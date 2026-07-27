@@ -45,9 +45,16 @@ if DIST_DIR.exists() and DIST_DIR.is_dir():
 
     @app.get("/{full_path:path}")
     async def serve_spa(full_path: str):
-        # Prevent swallowing non-existent /api or /health routes with index.html
-        if full_path.startswith("api/") or full_path == "api" or full_path == "health":
-            return JSONResponse(status_code=404, content={"detail": "API endpoint not found"})
+        clean_path = full_path.lower().strip()
+        
+        # Block API routes, sensitive files, dotfiles, and backup configurations with strict 404
+        if (
+            clean_path.startswith("api/") or clean_path == "api" or clean_path == "health" or
+            ".env" in clean_path or ".bak" in clean_path or ".git" in clean_path or
+            "config" in clean_path or clean_path.startswith(".") or
+            any(clean_path.endswith(ext) for ext in [".env", ".bak", ".config", ".key", ".pem", ".db", ".json", ".ini"])
+        ):
+            return JSONResponse(status_code=404, content={"detail": "Not found"})
         
         target_file = DIST_DIR / full_path
         if target_file.exists() and target_file.is_file():
