@@ -1,0 +1,63 @@
+from pathlib import Path
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse, JSONResponse
+from backend.routers import aqi, why
+from backend.config import PORT, CORS_ORIGINS
+from backend.db import init_db
+from backend.middleware.rate_limit import RateLimitAndLoggingMiddleware
+
+# Initialize SQLite database for narrative caching & geocoding cache
+init_db()
+
+app = FastAPI(
+    title="AQI 'Show Why' API",
+    description="Backend API for US Air Quality Index observation and evidence-first attribution.",
+    version="1.0.0"
+)
+
+# Add Rate Limiting & Light Request Logging Middleware
+app.add_middleware(RateLimitAndLoggingMiddleware)
+
+# Enable CORS driven by environment config
+app.add_middleware(CORSMiddleware,
+    allow_origins=CORS_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+app.include_router(aqi.router)
+app.include_router(why.router)
+
+@app.get("/health")
+async def health():
+    return {"status": "ok", "app": "AQI Show Why MVP"}
+
+# Production single-process SPA static serving
+DIST_DIR = Path(__file__).resolve().parent.parent / "frontend" / "dist"
+
+if DIST_DIR.exists() and DIST_DIR.is_dir():
+    assets_dir = DIST_DIR / "assets"
+    if assets_dir.exists() and assets_dir.is_dir():
+        app.mount("/assets", StaticFiles(directory=assets_dir), name="assets")
+
+    @app.get("/{full_path:path}")
+    async def serve_spa(full_path: str):
+        # Prevent swallowing non-existent /api or /health routes with index.html
+        if full_path.startswith("api/") or full_path == "api" or full_path == "health":
+            return JSONResponse(status_code=404, content={"detail": "API endpoint not found"})
+        
+        target_file = DIST_DIR / full_path
+        if target_file.exists() and target_file.is_file():
+            return FileResponse(target_file)
+        
+        index_file = DIST_DIR / "index.html"
+        if index_file.exists():
+            return FileResponse(index_file)
+        return JSONResponse(status_code=404, content={"detail": "Index file missing"})
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run("backend.main:app", host="0.0.0.0", port=PORT, reload=True)
