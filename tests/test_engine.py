@@ -120,3 +120,148 @@ def test_score_winter_stagnation():
 def test_incident_web_search():
     name = asyncio.run(search_fire_incident_name("CA", "Chico", 39.72, -121.83))
     assert name is None or isinstance(name, str)
+
+def test_uncorroborated_news_fire_stays_low():
+    """Uncorroborated news hit (clean AOD + no FIRMS) must NOT count as a fire vote or elevate smoke."""
+    observation = {"aqi": 85, "primary_pollutant": "PM2.5", "category": "Moderate"}
+    signals = [
+        {"id": "aerosol_plume", "status": "absent", "aod_value": 0.08},
+        {"id": "firms_upwind", "status": "absent", "count": 0, "incident_name": "Sandy Fire"},
+        {"id": "wind", "status": "present", "speed_mph": 6.0, "direction_deg": 180.0},
+        {"id": "surface_pm_level", "status": "present", "primary": True, "pm10_primary": False, "pm25_primary": True, "elevated": True},
+        {"id": "ozone_heat", "status": "absent", "primary": False, "hot_day": False, "temperature_f": 65.0}
+    ]
+    hypotheses, questions = score_hypotheses(observation, signals)
+    smoke_h = next(h for h in hypotheses if h["id"] == "wildfire_smoke")
+    assert smoke_h["confidence"] == "low"
+    assert not any("Confirmed active" in s for s in smoke_h["support"])
+    assert any("Sandy Fire" in q for q in questions)
+    top_h = hypotheses[0]
+    assert top_h["id"] != "wildfire_smoke"
+
+def test_corroborated_news_fire_elevates_smoke():
+    """News hit corroborated by FIRMS thermal hotspots is allowed as positive support."""
+    observation = {"aqi": 110, "primary_pollutant": "PM2.5", "category": "Unhealthy for Sensitive Groups"}
+    signals = [
+        {"id": "aerosol_plume", "status": "absent", "aod_value": 0.15},
+        {"id": "firms_upwind", "status": "present", "count": 2, "incident_name": "Creek Fire", "nearest": {"distance_miles": 20.0, "bearing": "N", "distance_km": 32.0}},
+        {"id": "wind", "status": "present", "speed_mph": 8.0, "direction_deg": 0.0},
+        {"id": "surface_pm_level", "status": "present", "primary": True, "pm10_primary": False, "pm25_primary": True, "elevated": True},
+        {"id": "ozone_heat", "status": "absent", "primary": False, "hot_day": False}
+    ]
+    hypotheses, questions = score_hypotheses(observation, signals)
+    smoke_h = next(h for h in hypotheses if h["id"] == "wildfire_smoke")
+    assert smoke_h["confidence"] in ["medium", "high"]
+    assert any("Creek Fire" in s for s in smoke_h["support"])
+
+def test_clean_aod_elevated_pm_adds_smoke_against():
+    """Elevated PM with clean overhead AOD adds clear-column contradiction to smoke_against."""
+    observation = {"aqi": 90, "primary_pollutant": "PM2.5", "category": "Moderate"}
+    signals = [
+        {"id": "aerosol_plume", "status": "absent", "aod_value": 0.05},
+        {"id": "firms_upwind", "status": "absent", "count": 0},
+        {"id": "wind", "status": "present", "speed_mph": 5.0, "direction_deg": 180.0},
+        {"id": "surface_pm_level", "status": "present", "primary": True, "pm10_primary": False, "pm25_primary": True, "elevated": True},
+        {"id": "ozone_heat", "status": "absent", "primary": False, "hot_day": False}
+    ]
+    hypotheses, questions = score_hypotheses(observation, signals)
+    smoke_h = next(h for h in hypotheses if h["id"] == "wildfire_smoke")
+    assert any("Clear column overhead" in a for a in smoke_h["against"])
+
+def test_aod_only_medium_haze_urban_beats_smoke():
+    """Manhattan-shaped case: medium AOD, no FIRMS, junk news name — urban should win, smoke not high."""
+    observation = {"aqi": 56, "primary_pollutant": "PM2.5", "category": "Moderate"}
+    signals = [
+        {"id": "aerosol_plume", "status": "present", "aod_value": 0.49, "density": "medium"},
+        {"id": "firms_upwind", "status": "absent", "count": 0, "incident_name": "Man Starts Fire"},
+        {"id": "wind", "status": "present", "speed_mph": 1.9, "direction_deg": 291.0, "boundary_layer_height_m": 470.0},
+        {"id": "surface_pm_level", "status": "present", "primary": True, "pm10_primary": False, "pm25_primary": True, "elevated": True},
+        {"id": "ozone_heat", "status": "absent", "primary": False, "hot_day": False, "temperature_f": 74.4}
+    ]
+    hypotheses, questions = score_hypotheses(observation, signals)
+    smoke_h = next(h for h in hypotheses if h["id"] == "wildfire_smoke")
+    urban_h = next(h for h in hypotheses if h["id"] == "urban_industrial_pm")
+    assert smoke_h["confidence"] == "medium"
+    assert smoke_h["score"] < 70
+    assert not any("Man Starts Fire" in s for s in smoke_h["support"])
+    assert any("Man Starts Fire" in q for q in questions)
+    assert urban_h["score"] > smoke_h["score"]
+    assert hypotheses[0]["id"] == "urban_industrial_pm"
+
+def test_heavy_aod_no_firms_keeps_smoke_competitive():
+    """Long-range style: heavy AOD + elevated PM without nearby FIRMS still elevates smoke over urban."""
+    observation = {"aqi": 110, "primary_pollutant": "PM2.5", "category": "Unhealthy for Sensitive Groups"}
+    signals = [
+        {"id": "aerosol_plume", "status": "present", "aod_value": 0.85, "density": "heavy"},
+        {"id": "firms_upwind", "status": "absent", "count": 0},
+        {"id": "wind", "status": "present", "speed_mph": 8.0, "direction_deg": 0.0},
+        {"id": "surface_pm_level", "status": "present", "primary": True, "pm10_primary": False, "pm25_primary": True, "elevated": True},
+        {"id": "ozone_heat", "status": "absent", "primary": False, "hot_day": False, "temperature_f": 70.0}
+    ]
+    hypotheses, questions = score_hypotheses(observation, signals)
+    smoke_h = next(h for h in hypotheses if h["id"] == "wildfire_smoke")
+    assert smoke_h["confidence"] == "medium"
+    assert smoke_h["score"] >= 70
+    assert hypotheses[0]["id"] == "wildfire_smoke"
+
+def test_burns_light_haze_extreme_pm_favors_smoke():
+    """Burns-shaped: light AOD (~0.38) + Very Unhealthy PM, no FIRMS — smoke should beat urban."""
+    observation = {"aqi": 227, "primary_pollutant": "PM2.5", "category": "Very Unhealthy"}
+    signals = [
+        {"id": "aerosol_plume", "status": "present", "aod_value": 0.38, "density": "light"},
+        {"id": "firms_upwind", "status": "absent", "count": 0, "incident_name": "Little Fire"},
+        {"id": "wind", "status": "present", "speed_mph": 3.0, "direction_deg": 270.0},
+        {"id": "surface_pm_level", "status": "present", "primary": True, "pm10_primary": False, "pm25_primary": True, "elevated": True},
+        {"id": "ozone_heat", "status": "absent", "primary": False, "hot_day": False, "temperature_f": 72.0}
+    ]
+    hypotheses, _ = score_hypotheses(observation, signals)
+    smoke_h = next(h for h in hypotheses if h["id"] == "wildfire_smoke")
+    urban_h = next(h for h in hypotheses if h["id"] == "urban_industrial_pm")
+    assert smoke_h["confidence"] == "medium"
+    assert smoke_h["score"] >= 60
+    assert smoke_h["score"] > urban_h["score"]
+    assert hypotheses[0]["id"] == "wildfire_smoke"
+    assert not any("Little Fire" in s for s in smoke_h["support"])
+
+def test_food_truck_extreme_pm_clear_aod_stays_urban():
+    """Extreme local PM with clear AOD and no FIRMS stays urban — do not demote on AQI alone."""
+    observation = {"aqi": 227, "primary_pollutant": "PM2.5", "category": "Very Unhealthy"}
+    signals = [
+        {"id": "aerosol_plume", "status": "absent", "aod_value": 0.08},
+        {"id": "firms_upwind", "status": "absent", "count": 0},
+        {"id": "wind", "status": "present", "speed_mph": 5.0, "direction_deg": 180.0},
+        {"id": "surface_pm_level", "status": "present", "primary": True, "pm10_primary": False, "pm25_primary": True, "elevated": True},
+        {"id": "ozone_heat", "status": "absent", "primary": False, "hot_day": False, "temperature_f": 75.0}
+    ]
+    hypotheses, _ = score_hypotheses(observation, signals)
+    smoke_h = next(h for h in hypotheses if h["id"] == "wildfire_smoke")
+    urban_h = next(h for h in hypotheses if h["id"] == "urban_industrial_pm")
+    assert hypotheses[0]["id"] == "urban_industrial_pm"
+    assert urban_h["confidence"] == "high"
+    assert urban_h["score"] >= 70
+    assert smoke_h["confidence"] == "low"
+    assert any("Clear column overhead" in a for a in smoke_h["against"])
+
+def test_nearby_non_upwind_firms_elevates_smoke():
+    """Nearby (non-upwind) FIRMS still elevates smoke over urban, slightly weaker than upwind."""
+    observation = {"aqi": 160, "primary_pollutant": "PM2.5", "category": "Unhealthy"}
+    signals = [
+        {"id": "aerosol_plume", "status": "present", "aod_value": 0.35, "density": "light"},
+        {
+            "id": "firms_upwind",
+            "status": "present",
+            "count": 4,
+            "alignment": "nearby",
+            "nearest": {"distance_miles": 40.0, "bearing": "E", "distance_km": 64.0},
+        },
+        {"id": "wind", "status": "present", "speed_mph": 4.0, "direction_deg": 0.0},
+        {"id": "surface_pm_level", "status": "present", "primary": True, "pm10_primary": False, "pm25_primary": True, "elevated": True},
+        {"id": "ozone_heat", "status": "absent", "primary": False, "hot_day": False, "temperature_f": 70.0}
+    ]
+    hypotheses, _ = score_hypotheses(observation, signals)
+    smoke_h = next(h for h in hypotheses if h["id"] == "wildfire_smoke")
+    assert smoke_h["confidence"] == "medium"
+    assert smoke_h["score"] >= 60
+    assert hypotheses[0]["id"] == "wildfire_smoke"
+    assert any("nearby" in s.lower() for s in smoke_h["support"])
+

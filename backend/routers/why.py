@@ -233,6 +233,7 @@ async def stream_why_explanation(
                 "total_count": firms_res.get("total_count", 0),
                 "nearest": firms_res.get("nearest"),
                 "hotspots": firms_res.get("hotspots", []),
+                "alignment": firms_res.get("alignment"),
                 "incident_name": incident_name,
                 "details": firms_res.get("details", "")
             },
