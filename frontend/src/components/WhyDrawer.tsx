@@ -39,10 +39,14 @@ export const WhyDrawer: React.FC<WhyDrawerProps> = ({
   const [isTraceCollapsed, setIsTraceCollapsed] = useState<boolean>(false);
   const [signals, setSignals] = useState<SignalItem[]>([]);
   const [hypotheses, setHypotheses] = useState<HypothesisItem[]>([]);
-  const [openQuestions, setOpenQuestions] = useState<string[]>([]);
   const [streamedNarrative, setStreamedNarrative] = useState<string>('');
   const [isStreamingLLM, setIsStreamingLLM] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
+
+  const isGoodAqi = (observation?.aqi ?? 0) <= 50;
+  const relevantHypotheses = isGoodAqi
+    ? hypotheses.filter(h => h.support.length > 0)
+    : hypotheses;
 
   useEffect(() => {
     if (!isOpen || !location || !observation) {
@@ -50,7 +54,6 @@ export const WhyDrawer: React.FC<WhyDrawerProps> = ({
       setIsTraceCollapsed(false);
       setSignals([]);
       setHypotheses([]);
-      setOpenQuestions([]);
       setStreamedNarrative('');
       setIsStreamingLLM(false);
       setError(null);
@@ -62,7 +65,6 @@ export const WhyDrawer: React.FC<WhyDrawerProps> = ({
     setIsTraceCollapsed(false);
     setSignals([]);
     setHypotheses([]);
-    setOpenQuestions([]);
     setStreamedNarrative('');
     setIsStreamingLLM(false);
     setError(null);
@@ -82,7 +84,6 @@ export const WhyDrawer: React.FC<WhyDrawerProps> = ({
       onSignalsReady: (data) => {
         setSignals(data.signals || []);
         setHypotheses(data.hypotheses || []);
-        setOpenQuestions(data.open_questions || []);
         onSignalsReadyProp?.(data);
         setIsStreamingLLM(true);
         // Automatically collapse tool execution accordion so narrative takes center stage
@@ -119,7 +120,7 @@ export const WhyDrawer: React.FC<WhyDrawerProps> = ({
         <div className="drawer-header">
           <div className="flex items-center gap-2">
             <Sparkles className="text-accent" size={20} />
-            <h3 className="drawer-title">Debrief</h3>
+            <h3 className="drawer-title">Air Quality Breakdown</h3>
           </div>
           <button onClick={onClose} className="drawer-close-btn">
             <X size={20} />
@@ -144,50 +145,58 @@ export const WhyDrawer: React.FC<WhyDrawerProps> = ({
             </div>
           )}
 
-          {/* Expanded Tool Execution Trace */}
-          {(!isTraceCollapsed || signals.length === 0) && (
-            <div className="tool-execution-container" style={{ marginBottom: '16px' }}>
-              <div className="tool-steps-list">
-                {toolSteps.map((step, idx) => {
-                  const StepIcon = step.icon;
-                  const isDone = step.status === 'done';
-                  const isInProgress = step.status === 'in_progress';
-                  const isPending = step.status === 'pending';
+          {/* Tool Execution Trace — always mounted so collapse/expand animates
+              via CSS (grid-template-rows) instead of an abrupt mount/unmount. */}
+          <div className={`trace-collapse-wrapper ${isTraceCollapsed ? 'is-collapsed' : ''}`}>
+            <div className="trace-collapse-inner">
+              <div className="tool-execution-container" style={{ marginBottom: '16px' }}>
+                <div className="tool-steps-list">
+                  {toolSteps.map((step, idx) => {
+                    const StepIcon = step.icon;
+                    const isDone = step.status === 'done';
+                    const isInProgress = step.status === 'in_progress';
+                    const isPending = step.status === 'pending';
+                    // Cascade: opening reveals top-to-bottom, closing folds bottom-to-top.
+                    const cascadeDelay = isTraceCollapsed
+                      ? (toolSteps.length - 1 - idx) * 18
+                      : idx * 18;
 
-                  return (
-                    <div
-                      key={idx}
-                      className={`tool-step-card ${isDone ? 'step-done' : ''} ${isInProgress ? 'step-active' : ''} ${isPending ? 'step-pending' : ''}`}
-                    >
-                      <div className="step-icon-wrapper">
-                        {isDone ? (
-                          <CheckCircle2 size={16} className="text-emerald-400" />
-                        ) : isInProgress ? (
-                          <Loader2 size={16} className="animate-spin text-accent" />
-                        ) : (
-                          <Circle size={16} className="text-zinc-600" />
+                    return (
+                      <div
+                        key={idx}
+                        className={`tool-step-card ${isDone ? 'step-done' : ''} ${isInProgress ? 'step-active' : ''} ${isPending ? 'step-pending' : ''}`}
+                        style={{ transitionDelay: `${cascadeDelay}ms` }}
+                      >
+                        <div className="step-icon-wrapper">
+                          {isDone ? (
+                            <CheckCircle2 size={16} className="text-emerald-400" />
+                          ) : isInProgress ? (
+                            <Loader2 size={16} className="animate-spin text-accent" />
+                          ) : (
+                            <Circle size={16} className="text-zinc-600" />
+                          )}
+                        </div>
+
+                        <div className="flex flex-col" style={{ flex: 1 }}>
+                          <span className="step-label">{step.label}</span>
+                        </div>
+
+                        {isDone && step.duration_ms !== undefined && (
+                          <div className="flex items-center gap-1 text-zinc-400" style={{ fontSize: '0.7rem', fontWeight: 600 }}>
+                            <span>{step.duration_ms < 1 ? '<1ms' : `${step.duration_ms}ms`}</span>
+                          </div>
+                        )}
+
+                        {!isDone && (
+                          <StepIcon size={14} className={isInProgress ? 'text-accent' : 'text-zinc-600'} style={{ marginLeft: 'auto' }} />
                         )}
                       </div>
-
-                      <div className="flex flex-col" style={{ flex: 1 }}>
-                        <span className="step-label">{step.label}</span>
-                      </div>
-
-                      {isDone && step.duration_ms !== undefined && (
-                        <div className="flex items-center gap-1 text-zinc-400" style={{ fontSize: '0.7rem', fontWeight: 600 }}>
-                          <span>{step.duration_ms < 1 ? '<1ms' : `${step.duration_ms}ms`}</span>
-                        </div>
-                      )}
-
-                      {!isDone && (
-                        <StepIcon size={14} className={isInProgress ? 'text-accent' : 'text-zinc-600'} style={{ marginLeft: 'auto' }} />
-                      )}
-                    </div>
-                  );
-                })}
+                    );
+                  })}
+                </div>
               </div>
             </div>
-          )}
+          </div>
 
           {error && (
             <div className="drawer-state-container text-red-400">
@@ -199,6 +208,14 @@ export const WhyDrawer: React.FC<WhyDrawerProps> = ({
           {/* Real-time Streaming LLM Briefing & Evidence Package */}
           {(streamedNarrative || signals.length > 0) && (
             <div className="evidence-container">
+              {/* Good AQI Short-Circuit Lead Banner */}
+              {isGoodAqi && (
+                <div className="good-aqi-lead-banner">
+                  <CheckCircle2 size={18} className="text-emerald-400" />
+                  <span>Air quality is Good (AQI {observation?.aqi}), no elevated surface pollution to attribute.</span>
+                </div>
+              )}
+
               {/* Streaming Narrative Briefing Box */}
               <div className="narrative-box">
                 <h4 className="section-subtitle">Evidence Briefing</h4>
@@ -208,11 +225,18 @@ export const WhyDrawer: React.FC<WhyDrawerProps> = ({
                 </p>
               </div>
 
-              {/* Ranked Hypotheses */}
-              {hypotheses.length > 0 && (
+              {/* Ranked Hypotheses or Situational Context */}
+              {relevantHypotheses.length > 0 && (
                 <div className="hypotheses-section">
-                  <h4 className="section-subtitle">Hypotheses</h4>
-                  {hypotheses.map((h) => (
+                  <h4 className="section-subtitle">
+                    {isGoodAqi ? "Context" : "Attribution Hypotheses"}
+                  </h4>
+                  {isGoodAqi && (
+                    <p style={{ fontSize: '0.75rem', color: '#94a3b8', marginBottom: '12px' }}>
+                      These factors are present nearby in the atmosphere, but surface air quality remains healthy.
+                    </p>
+                  )}
+                  {relevantHypotheses.map((h) => (
                     <div key={h.id} className={`hypothesis-card confidence-${h.confidence}`}>
                       <div className="hypothesis-header">
                         <span className="hypothesis-title">{h.title}</span>
@@ -234,7 +258,7 @@ export const WhyDrawer: React.FC<WhyDrawerProps> = ({
                         </div>
                       )}
 
-                      {h.against.length > 0 && (
+                      {!isGoodAqi && h.against.length > 0 && (
                         <div className="evidence-list against">
                           <span className="evidence-label">Against</span>
                           {h.against.map((a, idx) => (
@@ -247,23 +271,6 @@ export const WhyDrawer: React.FC<WhyDrawerProps> = ({
                       )}
                     </div>
                   ))}
-                </div>
-              )}
-
-              {/* Open Questions */}
-              {openQuestions.length > 0 && (
-                <div className="hypotheses-section">
-                  <h4 className="section-subtitle">Open Questions</h4>
-                  <div className="flex flex-col gap-2">
-                    {openQuestions.map((q, idx) => (
-                      <div key={idx} className="hypothesis-card" style={{ borderColor: 'rgba(251, 191, 36, 0.3)', backgroundColor: 'rgba(251, 191, 36, 0.05)' }}>
-                        <div className="flex items-start gap-2 text-amber-300" style={{ fontSize: '0.85rem' }}>
-                          <AlertCircle size={16} className="mt-0.5 shrink-0" />
-                          <span>{q}</span>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
                 </div>
               )}
 
@@ -284,10 +291,6 @@ export const WhyDrawer: React.FC<WhyDrawerProps> = ({
               )}
             </div>
           )}
-        </div>
-
-        <div style={{ padding: '12px 20px', borderTop: '1px solid var(--border-color)', fontSize: '0.75rem', color: 'var(--text-secondary)', textAlign: 'center' }}>
-          Ranked observational hypotheses, not chemical source apportionment.
         </div>
       </div>
     </div>

@@ -6,7 +6,6 @@ import { MapView } from './components/MapView';
 import { AqiCard } from './components/AqiCard';
 import { WhyDrawer } from './components/WhyDrawer';
 import { fetchAqiData, fetchAqiByCoords } from './services/api';
-import { getRecents, pushRecent, type RecentPlace } from './services/recentPlaces';
 
 export const App: React.FC = () => {
   const [location, setLocation] = useState<LocationInfo | null>(null);
@@ -14,13 +13,17 @@ export const App: React.FC = () => {
   const [whyData, setWhyData] = useState<WhyResponse | null>(null);
   const [loadingAqi, setLoadingAqi] = useState<boolean>(false);
   const [errorAqi, setErrorAqi] = useState<string | null>(null);
-  const [recents, setRecents] = useState<RecentPlace[]>(getRecents());
 
   const [drawerOpen, setDrawerOpen] = useState<boolean>(false);
 
   // Load default location on initial mount (e.g. 90210 Beverly Hills / Los Angeles)
   useEffect(() => {
     handleSearch('90210');
+  }, []);
+
+  // Enforce tab title to Upwind
+  useEffect(() => {
+    document.title = 'Upwind';
   }, []);
 
   // Auto-clear error toast after 4 seconds
@@ -39,14 +42,6 @@ export const App: React.FC = () => {
       setLocation(res.location);
       setObservation(res.observation);
       setWhyData(null);
-      const updated = pushRecent({
-        name: res.location.name,
-        lat: res.location.lat,
-        lon: res.location.lon,
-        zip_code: res.location.zip_code,
-        query
-      });
-      setRecents(updated);
     } catch (err: any) {
       setErrorAqi(err.message || 'Upwind currently covers US states & territories only.');
     } finally {
@@ -62,13 +57,6 @@ export const App: React.FC = () => {
       setLocation(res.location);
       setObservation(res.observation);
       setWhyData(null);
-      const updated = pushRecent({
-        name: res.location.name,
-        lat: res.location.lat,
-        lon: res.location.lon,
-        zip_code: res.location.zip_code
-      });
-      setRecents(updated);
     } catch (err: any) {
       setErrorAqi(err.message || 'Upwind currently covers US states & territories only.');
     } finally {
@@ -93,29 +81,12 @@ export const App: React.FC = () => {
           </div>
         </div>
 
-        <div className="search-section flex flex-col gap-1">
-          <SearchBar
-            onSearch={handleSearch}
-            onLocate={handleMapClick}
-            onError={(msg) => setErrorAqi(msg)}
-            loading={loadingAqi}
-          />
-          {recents.length > 0 && (
-            <div className="recent-chips-container flex items-center gap-1 overflow-x-auto py-0.5">
-              <span className="recent-label text-zinc-500 text-xs shrink-0 mr-1" style={{ fontSize: '0.7rem' }}>Recents:</span>
-              {recents.map((r, i) => (
-                <button
-                  key={i}
-                  onClick={() => r.zip_code ? handleSearch(r.zip_code) : handleMapClick(r.lat, r.lon)}
-                  className="recent-chip px-2 py-0.5 rounded text-xs text-zinc-300 bg-zinc-800/80 hover:bg-zinc-700/80 border border-zinc-700/50 shrink-0 transition-colors cursor-pointer"
-                  style={{ fontSize: '0.72rem' }}
-                >
-                  {r.name.split(',')[0]}
-                </button>
-              ))}
-            </div>
-          )}
-        </div>
+        <SearchBar
+          onSearch={handleSearch}
+          onLocate={handleMapClick}
+          onError={(msg) => setErrorAqi(msg)}
+          loading={loadingAqi}
+        />
       </header>
 
       {/* Main Map View */}
