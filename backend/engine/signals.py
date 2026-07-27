@@ -99,6 +99,9 @@ async def assemble_evidence_signals(
     # Signal 2: FIRMS Upwind Hotspots
     firms_status = firms_res["status"]
     firms_details = firms_res.get("details", "")
+    aod_value = float(aod_res.get("aod_value") or 0.0)
+    firms_present = firms_status == "present"
+    has_corroboration = firms_present or (aod_res.get("status") == "present" and aod_value >= 0.2)
 
     signals.append({
         "id": "firms_upwind",
@@ -108,7 +111,9 @@ async def assemble_evidence_signals(
         "total_count": firms_res.get("total_count", 0),
         "nearest": firms_res.get("nearest"),
         "hotspots": firms_res.get("hotspots", []),
-        "incident_name": incident_name,
+        "alignment": firms_res.get("alignment"),
+        "incident_name": incident_name if has_corroboration else None,
+        "unverified_news_incident": incident_name if not has_corroboration else None,
         "details": firms_details
     })
 

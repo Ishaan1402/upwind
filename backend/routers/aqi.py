@@ -1,3 +1,4 @@
+import asyncio
 from fastapi import APIRouter, HTTPException, Query
 from typing import Optional
 from backend.services.geocode import geocode_location
@@ -37,12 +38,14 @@ async def get_aqi(
     target_lat = location_info["lat"]
     target_lon = location_info["lon"]
 
-    # 1. Try AirNow API
-    observation = await fetch_airnow_observation(target_lat, target_lon)
+    # Fetch AirNow (primary) and Open-Meteo (fallback) concurrently for ultra-fast response
+    airnow_res, openmeteo_res = await asyncio.gather(
+        fetch_airnow_observation(target_lat, target_lon),
+        fetch_openmeteo_aqi(target_lat, target_lon),
+        return_exceptions=True
+    )
 
-    # 2. Fallback to Open-Meteo Air Quality
-    if not observation:
-        observation = await fetch_openmeteo_aqi(target_lat, target_lon)
+    observation = airnow_res if (isinstance(airnow_res, dict) and airnow_res) else (openmeteo_res if (isinstance(openmeteo_res, dict) and openmeteo_res) else None)
 
     if not observation:
         raise HTTPException(status_code=503, detail="Air quality data is currently unavailable for this location.")

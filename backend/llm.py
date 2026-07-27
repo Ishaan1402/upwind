@@ -10,7 +10,11 @@ Rules:
 3. NO HEADERS OR TITLES: Do NOT include titles, dates, or headers (no "**Briefing:**", no "# Titles").
 4. NO JARGON OR INTERNAL SCORES: NEVER mention raw acronyms or backend numbers (no "hypothesis score of 90", no "AOD 0.68", no "FIRMS", no "photochemical ozone formation"). Translate technical data into plain English (e.g. "a thick layer of overhead smoke", "satellite fire trackers", "cool temperatures suppressing ozone").
 5. Grounding: Ground every statement strictly in the provided signals[], hypotheses[], and open_questions[]. Never invent unlisted fires or industrial plants.
-6. Actionable Takeaway: End with a warm, 1-sentence practical health tip tailored to the AQI category (e.g. if AQI is elevated, suggest keeping windows closed or taking it easy outdoors for sensitive lungs).
+6. Actionable Takeaway: End with a warm, 1-sentence practical health tip tailored to the AQI category.
+7. Good AQI Rule (AQI <= 50): When ground AQI is 50 or below, state clearly in your very first sentence that surface air is healthy and clean. Do NOT write as if there is elevated air pollution to explain. If satellite feeds or news mention distant fires or high-altitude smoke, frame them strictly as 'aloft or regional context' that has not impacted ground breathing air.
+8. Fire Name Corroboration: Only state that a named wildfire is affecting ground air if support lists nearby thermal hotspots (not news or haze alone). Overhead haze without nearby fires should be framed as regional/urban particles, not a confirmed distant wildfire.
+9. No Invented Transport: Do NOT invent transport mechanisms (e.g. trapping by light winds or shallow boundary layer) unless those appear in the top hypothesis's support list.
+10. Unverified News Handling: If open_questions mention an unverified news fire, treat it as uncertainty or distant context, not the primary cause.
 """
 
 def generate_fallback_narrative(
@@ -20,18 +24,35 @@ def generate_fallback_narrative(
     hypotheses: List[Dict[str, Any]],
     open_questions: List[str]
 ) -> str:
-    top_h = hypotheses[0] if hypotheses else None
     loc_name = location.get("name", "this location")
     aqi_val = observation.get("aqi", 0)
-    category = observation.get("category", "Moderate")
+    category = observation.get("category", "Good")
     pollutant = observation.get("primary_pollutant", "PM2.5")
 
-    text = f"Air quality in {loc_name} is currently {category} (AQI {aqi_val}), driven primarily by fine smoke dust ({pollutant}). "
+    if aqi_val <= 50:
+        text = f"Air quality in {loc_name} is currently Good (AQI {aqi_val}). Breathing air at the ground level is clean and healthy. "
+        aod_sig = next((s for s in signals if s.get("id") == "aerosol_plume"), {})
+        firms_sig = next((s for s in signals if s.get("id") == "firms_upwind"), {})
+        if aod_sig.get("status") == "present" or firms_sig.get("status") == "present":
+            text += "Satellites detect some high-altitude smoke or regional fire activity, but it remains aloft without affecting ground air. "
+        text += "\n\nIt's a great day to enjoy outdoor activities!"
+        return text
+
+    top_h = hypotheses[0] if hypotheses else None
+    pollutant_desc = "coarse dust particulate (PM10)" if pollutant == "PM10" else ("fine particulate pollution (PM2.5)" if "PM" in pollutant else pollutant)
+    text = f"Air quality in {loc_name} is currently {category} (AQI {aqi_val}), with {pollutant_desc} as the primary reporting pollutant. "
 
     if top_h:
         text += f"The primary cause is {top_h['title'].lower()} ({top_h['confidence']} confidence). "
         if top_h["support"]:
-            text += "Key observations: " + "; ".join(top_h["support"]) + ". "
+            clean_support = [
+                s.replace("Dense atmospheric column particle plume detected", "Thick overhead smoke plume detected")
+                 .replace("AOD", "particle density")
+                 .replace("NASA FIRMS", "satellite fire tracking")
+                 .replace("FIRMS", "satellite fire tracking")
+                for s in top_h["support"]
+            ]
+            text += "Key observations: " + "; ".join(clean_support) + ". "
     else:
         text += "No strong attribution signals were identified. "
 
@@ -40,6 +61,8 @@ def generate_fallback_narrative(
 
     if aqi_val > 100:
         text += "\n\nIf you have sensitive lungs or asthma, consider keeping windows closed and taking it easy outdoors today."
+    else:
+        text += "\n\nIt is a good day to monitor local air trends if you are sensitive to air pollution."
 
     return text
 

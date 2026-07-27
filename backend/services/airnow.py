@@ -22,7 +22,7 @@ async def fetch_airnow_observation(lat: float, lon: float, distance_miles: int =
     }
 
     try:
-        async with httpx.AsyncClient(timeout=6.0) as client:
+        async with httpx.AsyncClient(timeout=2.5) as client:
             response = await client.get(AIRNOW_LATLON_URL, params=params)
             if response.status_code != 200:
                 return None

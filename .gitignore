@@ -16,8 +16,9 @@ __pycache__/
 .coverage
 htmlcov/
 
-# App caches / local DB
+# App caches / local DB (auto-created at runtime — do not commit)
 backend/cache.db
+upwind.db
 *.db-journal
 
 # Frontend build & deps (also covered under frontend/.gitignore)

@@ -66,7 +66,7 @@ export const AqiCard: React.FC<AqiCardProps> = ({
       <div className="aqi-footer">
         <button className="show-why-btn" onClick={onShowWhy} disabled={loadingWhy}>
           <HelpCircle size={18} />
-          <span>{loadingWhy ? 'Loading...' : 'Show Why'}</span>
+          <span>{loadingWhy ? 'Loading...' : (aqi <= 50 ? "What's going on?" : "Show Why")}</span>
         </button>
       </div>
     </div>

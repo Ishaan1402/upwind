@@ -46,7 +46,7 @@ export const SearchBar: React.FC<SearchBarProps> = ({ onSearch, onLocate, onErro
           type="text"
           value={term}
           onChange={(e) => setTerm(e.target.value)}
-          placeholder="Enter US ZIP code or City"
+          placeholder="Enter US ZIP code or City, State"
           className="search-input"
         />
         {onLocate && (
