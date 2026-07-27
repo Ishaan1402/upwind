@@ -17,7 +17,7 @@ async def fetch_openmeteo_aqi(lat: float, lon: float) -> Optional[Dict[str, Any]
     }
 
     try:
-        async with httpx.AsyncClient(timeout=6.0) as client:
+        async with httpx.AsyncClient(timeout=2.5) as client:
             resp = await client.get(OPENMETEO_AQ_URL, params=params)
             if resp.status_code != 200:
                 print(f"[Open-Meteo Service Error]: HTTP {resp.status_code} - {resp.text}")
@@ -76,7 +76,7 @@ async def fetch_openmeteo_weather(lat: float, lon: float) -> Optional[Dict[str, 
     }
 
     try:
-        async with httpx.AsyncClient(timeout=6.0) as client:
+        async with httpx.AsyncClient(timeout=2.5) as client:
             resp = await client.get(OPENMETEO_WEATHER_URL, params=params)
             if resp.status_code != 200:
                 print(f"[Open-Meteo Weather Error]: HTTP {resp.status_code} - {resp.text}")
