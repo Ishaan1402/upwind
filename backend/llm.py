@@ -103,7 +103,7 @@ async def generate_narrative_briefing(
             narrative = "\n".join([l for l in lines if not l.startswith("**Briefing") and not l.startswith("#")]).strip()
         return narrative if narrative else generate_fallback_narrative(location, observation, signals, hypotheses, open_questions)
     except Exception as e:
-        print(f"[LLM Generation Warning]: {e}")
+        print(f"[LLM Generation Warning]: {e}", flush=True)
         return generate_fallback_narrative(location, observation, signals, hypotheses, open_questions)
 
 async def generate_narrative_briefing_stream(
@@ -151,7 +151,7 @@ async def generate_narrative_briefing_stream(
             if chunk.choices and chunk.choices[0].delta and chunk.choices[0].delta.content:
                 yield chunk.choices[0].delta.content
     except Exception as e:
-        print(f"[LLM Stream Warning]: {e}")
+        print(f"[LLM Stream Warning]: {e}", flush=True)
         fallback = generate_fallback_narrative(location, observation, signals, hypotheses, open_questions)
         for w in fallback.split(" "):
             yield w + " "
