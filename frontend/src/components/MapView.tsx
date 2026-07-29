@@ -161,7 +161,6 @@ export const MapView: React.FC<MapViewProps> = ({ location, observation, whyData
       }
     };
     el.addEventListener('click', handlePinClick);
-    el.addEventListener('touchstart', handlePinClick);
 
     markerRef.current = new maplibregl.Marker({ element: el })
       .setLngLat([location.lon, location.lat])
@@ -202,7 +201,9 @@ export const MapView: React.FC<MapViewProps> = ({ location, observation, whyData
         // Create interactive popup tooltip on click/tap
         const popupContent = `
           <div class="fire-popup-inner">
-            <div class="fire-popup-title">🔥 NASA FIRMS Hotspot</div>
+            <div class="fire-popup-title">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="#fb923c" stroke="#f97316" stroke-width="1.5" style="display:inline-block; vertical-align:middle; margin-right:4px;"><path d="M8.5 14.5A2.5 2.5 0 0 0 11 12c0-1.38-.5-2-1-3-1.072-2.143-.224-4.054 2-6 .5 2.5 2 4.9 4 6.5 2 1.6 3 3.5 3 5.5a7 7 0 1 1-14 0c0-1.153.433-2.294 1-3a2.5 2.5 0 0 0 2.5 3.5z"/></svg>NASA FIRMS Hotspot
+            </div>
             <div class="fire-popup-dist">${distStr}</div>
             ${spot.frp ? `<div class="fire-popup-meta">Fire Power: ${spot.frp} MW</div>` : ''}
           </div>
@@ -239,7 +240,6 @@ export const MapView: React.FC<MapViewProps> = ({ location, observation, whyData
         };
 
         fireEl.addEventListener('click', handleFireClick);
-        fireEl.addEventListener('touchstart', handleFireClick);
 
         const marker = new maplibregl.Marker({ element: fireEl })
           .setLngLat([spot.lon, spot.lat])
