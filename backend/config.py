@@ -4,7 +4,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 def _clean_key(key: str) -> str:
-    cleaned = key.strip()
+    cleaned = key.strip().strip("'").strip('"')
     if not cleaned or "your_" in cleaned.lower() or "here" in cleaned.lower() or "placeholder" in cleaned.lower():
         return ""
     return cleaned

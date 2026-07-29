@@ -1,0 +1,44 @@
+name: Deploy Upwind to Oracle VM
+
+on:
+  push:
+    branches:
+      - main  # Triggers deployment whenever you push to main
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script: |
+            set -e  # Exit immediately if a command fails
+            
+            echo "--> Navigating to project directory..."
+            cd ~/upwind
+            
+            echo "--> Pulling latest code..."
+            git pull origin main
+            
+            echo "--> Updating Python virtual environment..."
+            ./venv/bin/pip install --upgrade pip
+            if [ -f backend/requirements.txt ]; then
+              ./venv/bin/pip install -r backend/requirements.txt
+            fi
+            
+            cd frontend
+            npm ci
+            npm run build
+            cd ..
+            
+            echo "--> Restarting Upwind application..."
+            sudo systemctl restart upwind
+            
+            echo "--> Verifying deployment..."
+            sleep 2
+            sudo systemctl is-active upwind
