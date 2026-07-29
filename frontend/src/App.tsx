@@ -86,6 +86,7 @@ export const App: React.FC = () => {
           onLocate={handleMapClick}
           onError={(msg) => setErrorAqi(msg)}
           loading={loadingAqi}
+          displayQuery={location?.zip_code || location?.name || ''}
         />
       </header>
 
@@ -106,7 +107,7 @@ export const App: React.FC = () => {
 
         {/* AQI Badge Card floating on top of map */}
         {location && observation && (
-          <div className="aqi-card-overlay">
+          <div className={`aqi-card-overlay ${drawerOpen ? 'is-drawer-open' : ''}`}>
             <AqiCard
               location={location}
               observation={observation}
