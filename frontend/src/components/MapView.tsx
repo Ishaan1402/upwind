@@ -36,6 +36,8 @@ export const MapView: React.FC<MapViewProps> = ({ location, observation, whyData
       return;
     }
 
+    let resizeObserver: ResizeObserver | null = null;
+
     try {
       // Initialize MapLibre map centered on North America / US
       const map = new maplibregl.Map({
@@ -79,12 +81,34 @@ export const MapView: React.FC<MapViewProps> = ({ location, observation, whyData
       });
 
       mapInstance.current = map;
+
+      // Force canvas resize once map is loaded
+      map.once('load', () => {
+        try { map.resize(); } catch (_) {}
+      });
+
+      // ResizeObserver to handle container height changes dynamically (e.g. mobile Safari URL bar collapse/expand)
+      if (typeof ResizeObserver !== 'undefined' && mapContainer.current) {
+        resizeObserver = new ResizeObserver(() => {
+          if (mapInstance.current) {
+            try { mapInstance.current.resize(); } catch (_) {}
+          }
+        });
+        resizeObserver.observe(mapContainer.current);
+      }
     } catch (err) {
       console.warn("[MapLibre WebGL Init Warning]:", err);
       setWebGlSupported(false);
     }
 
     return () => {
+      if (resizeObserver) {
+        try { resizeObserver.disconnect(); } catch (_) {}
+      }
+      if (markerRef.current) {
+        try { markerRef.current.remove(); } catch (e) {}
+        markerRef.current = null;
+      }
       if (mapInstance.current) {
         try {
           mapInstance.current.remove();
@@ -102,6 +126,12 @@ export const MapView: React.FC<MapViewProps> = ({ location, observation, whyData
 
     const map = mapInstance.current;
 
+    // Remove existing main marker to prevent leaks
+    if (markerRef.current) {
+      try { markerRef.current.remove(); } catch (e) {}
+      markerRef.current = null;
+    }
+
     // Create custom pin element
     const el = document.createElement('div');
     el.className = 'custom-aqi-pin';
@@ -113,18 +143,14 @@ export const MapView: React.FC<MapViewProps> = ({ location, observation, whyData
       </div>
     `;
 
-    if (markerRef.current) {
-      markerRef.current.setLngLat([location.lon, location.lat]);
-      const markerEl = markerRef.current.getElement();
-      markerEl.replaceWith(el);
-      markerRef.current = new maplibregl.Marker({ element: el })
-        .setLngLat([location.lon, location.lat])
-        .addTo(map);
-    } else {
-      markerRef.current = new maplibregl.Marker({ element: el })
-        .setLngLat([location.lon, location.lat])
-        .addTo(map);
-    }
+    // Stop propagation so clicking the pin doesn't trigger map onMapClick
+    const stopProp = (e: Event) => e.stopPropagation();
+    el.addEventListener('click', stopProp);
+    el.addEventListener('touchstart', stopProp);
+
+    markerRef.current = new maplibregl.Marker({ element: el })
+      .setLngLat([location.lon, location.lat])
+      .addTo(map);
 
     map.flyTo({
       center: [location.lon, location.lat],
@@ -153,6 +179,11 @@ export const MapView: React.FC<MapViewProps> = ({ location, observation, whyData
         fireEl.innerHTML = '🔥';
         fireEl.style.fontSize = '18px';
         fireEl.style.cursor = 'pointer';
+
+        // Stop propagation so clicking a fire hotspot doesn't trigger map onMapClick
+        const stopProp = (e: Event) => e.stopPropagation();
+        fireEl.addEventListener('click', stopProp);
+        fireEl.addEventListener('touchstart', stopProp);
 
         const marker = new maplibregl.Marker({ element: fireEl })
           .setLngLat([spot.lon, spot.lat])
