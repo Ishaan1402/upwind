@@ -42,6 +42,7 @@
 body, html, #root {
   width: 100%;
   height: 100%;
+  height: 100dvh;
   overflow: hidden;
   background-color: var(--bg-dark);
   color: var(--text-primary);
@@ -52,6 +53,7 @@ body, html, #root {
   flex-direction: column;
   width: 100vw;
   height: 100vh;
+  height: 100dvh;
   position: relative;
 }
 
@@ -158,6 +160,23 @@ body, html, #root {
   cursor: not-allowed;
 }
 
+.locate-btn {
+  background: transparent;
+  border: none;
+  color: var(--text-secondary);
+  cursor: pointer;
+  padding: 6px;
+  border-radius: var(--radius-sm);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-right: 4px;
+}
+
+.locate-btn:hover:not(:disabled) {
+  color: var(--text-primary);
+}
+
 /* Main Map */
 .app-main {
   width: 100%;
@@ -212,6 +231,10 @@ body, html, #root {
   left: 24px;
   z-index: 15;
   width: 340px;
+  opacity: 1;
+  transform: translateY(0);
+  transition: opacity 0.28s cubic-bezier(0.4, 0, 0.2, 1), transform 0.28s cubic-bezier(0.4, 0, 0.2, 1);
+  pointer-events: auto;
 }
 
 .aqi-card-glass {
@@ -404,7 +427,13 @@ body, html, #root {
   flex: 1;
   display: flex;
   flex-direction: column;
-  gap: 20px;
+  gap: 12px;
+}
+
+.trace-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
 }
 
 /* Tool Execution Trace & Collapsible Accordion Header */
@@ -559,7 +588,7 @@ body, html, #root {
   border: 1px solid var(--border-color);
   border-radius: var(--radius-md);
   padding: 16px;
-  margin-bottom: 24px;
+  margin-bottom: 16px;
 }
 
 .hypotheses-section {
@@ -687,6 +716,15 @@ body, html, #root {
   color: #cbd5e1;
 }
 
+.evidence-item svg {
+  width: 14px;
+  height: 14px;
+  min-width: 14px;
+  min-height: 14px;
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+
 /* Signals Grid */
 .signals-grid {
   display: grid;
@@ -807,59 +845,176 @@ body, html, #root {
 .text-red-400 { color: var(--danger); }
 .text-blue-400 { color: #60a5fa; }
 
+/* MapLibre Controls Dark Theme Styling */
+.maplibregl-ctrl-group {
+  background: var(--panel-bg) !important;
+  backdrop-filter: blur(var(--panel-blur)) !important;
+  border: 1px solid var(--border-color) !important;
+  border-radius: var(--radius-sm) !important;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4) !important;
+  overflow: hidden !important;
+}
+
+.maplibregl-ctrl-group button {
+  width: 34px !important;
+  height: 34px !important;
+  background: transparent !important;
+  border-bottom: 1px solid var(--border-color) !important;
+}
+
+.maplibregl-ctrl-group button:last-child {
+  border-bottom: none !important;
+}
+
+.maplibregl-ctrl-icon {
+  filter: invert(1) brightness(1.8) !important;
+}
+
+.maplibregl-ctrl-attrib {
+  background: rgba(10, 14, 22, 0.75) !important;
+  font-size: 9px !important;
+  padding: 2px 6px !important;
+  border-radius: 4px !important;
+  color: rgba(255, 255, 255, 0.5) !important;
+}
+
+.maplibregl-ctrl-attrib a {
+  color: rgba(255, 255, 255, 0.6) !important;
+  text-decoration: none !important;
+}
+
 /* Mobile responsive layout additions */
 @media (max-width: 768px) {
   .app-header {
-    flex-direction: column;
-    align-items: stretch;
-    padding: 12px 16px;
-    gap: 10px;
-    height: auto;
+    flex-direction: row;
+    align-items: center;
+    gap: 6px;
+    padding: 8px 10px;
+    padding-top: calc(8px + env(safe-area-inset-top, 0px));
+    left: 10px;
+    right: 10px;
+    width: auto;
+    max-width: none;
   }
 
   .header-brand {
-    justify-content: flex-start;
+    flex-shrink: 0;
+    gap: 0;
+    margin: 0;
+  }
+
+  .brand-title {
+    display: none; /* Hides text on mobile so search input gets full width */
   }
 
   .search-bar-container {
-    width: 100% !important;
-    max-width: 100% !important;
+    flex: 1;
+    min-width: 0;
+    width: auto !important;
+    max-width: none !important;
   }
 
-  .search-section {
-    width: 100%;
+  .search-input-wrapper {
+    padding: 4px 8px 4px 10px;
+    gap: 6px;
   }
 
-  .app-header {
+  .search-input {
+    font-size: 16px; /* prevents iOS Safari auto-focus zoom */
+  }
+
+  .search-btn,
+  .locate-btn,
+  .show-why-btn,
+  .drawer-close-btn {
+    touch-action: manipulation;
+  }
+
+  /* Position MapLibre zoom controls with clean margin below header */
+  .maplibregl-ctrl-top-right {
+    top: calc(env(safe-area-inset-top, 0px) + 84px) !important;
+    right: 10px !important;
+    z-index: 25 !important;
+  }
+
+  .maplibregl-ctrl-bottom-right {
+    bottom: calc(4px + env(safe-area-inset-bottom, 0px)) !important;
+    right: 12px !important;
+    z-index: 5 !important;
+  }
+
+  /* Error toast below header */
+  .error-toast {
+    top: calc(env(safe-area-inset-top, 0px) + 72px);
     left: 12px;
     right: 12px;
+    transform: none;
     width: auto;
   }
 
+  /* Floating AQI card overlay */
   .aqi-card-overlay {
-    bottom: 16px;
+    bottom: calc(16px + env(safe-area-inset-bottom, 0px));
     left: 12px;
     right: 12px;
     width: auto;
   }
 
+  .aqi-card-overlay.is-drawer-open {
+    opacity: 0;
+    transform: translateY(16px);
+    pointer-events: none;
+  }
+
+  /* Fire hotspot touch target hit box */
+  .fire-hotspot-marker {
+    min-width: 36px;
+    min-height: 36px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  /* Bottom sheet drawer */
   .drawer-overlay {
     flex-direction: column;
     justify-content: flex-end;
-    align-items: stretch;
   }
 
   .drawer-panel {
     width: 100%;
     max-width: 100%;
     height: 85vh;
+    height: 85dvh;
     border-left: none;
     border-top: 1px solid var(--border-color);
     border-radius: var(--radius-md) var(--radius-md) 0 0;
-    box-shadow: 0 -8px 24px rgba(0, 0, 0, 0.35);
   }
 
-  .recent-chips-container {
-    max-width: 100%;
+  .drawer-drag-zone {
+    touch-action: none;
+    user-select: none;
+    cursor: grab;
+  }
+
+  .drawer-drag-zone:active {
+    cursor: grabbing;
+  }
+
+  .drawer-handle {
+    width: 36px;
+    height: 4px;
+    border-radius: 999px;
+    background: var(--text-tertiary);
+    margin: 10px auto 0;
+    flex-shrink: 0;
+  }
+
+  .drawer-body {
+    padding-bottom: calc(24px + env(safe-area-inset-bottom, 0px));
+  }
+
+  .signals-grid {
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
   }
 }

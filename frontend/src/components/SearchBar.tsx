@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { Search, Loader2, Locate } from 'lucide-react';
 
 interface SearchBarProps {
@@ -6,11 +6,18 @@ interface SearchBarProps {
   onLocate?: (lat: number, lon: number) => void;
   onError?: (msg: string) => void;
   loading: boolean;
+  displayQuery?: string;
 }
 
-export const SearchBar: React.FC<SearchBarProps> = ({ onSearch, onLocate, onError, loading }) => {
+export const SearchBar: React.FC<SearchBarProps> = ({ onSearch, onLocate, onError, loading, displayQuery }) => {
   const [term, setTerm] = useState('');
   const [locating, setLocating] = useState(false);
+
+  useEffect(() => {
+    if (displayQuery !== undefined) {
+      setTerm(displayQuery);
+    }
+  }, [displayQuery]);
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -56,18 +63,6 @@ export const SearchBar: React.FC<SearchBarProps> = ({ onSearch, onLocate, onErro
             onClick={handleLocateClick}
             disabled={loading || locating}
             title="Use my location"
-            style={{
-              background: 'transparent',
-              border: 'none',
-              color: 'var(--text-secondary)',
-              cursor: 'pointer',
-              padding: '6px',
-              borderRadius: 'var(--radius-sm)',
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              marginRight: '4px'
-            }}
           >
             {locating ? <Loader2 className="animate-spin text-accent" size={16} /> : <Locate size={18} />}
           </button>

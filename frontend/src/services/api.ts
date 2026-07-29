@@ -82,6 +82,7 @@ export function streamWhyExplanation(location: any, observation: any, callbacks:
 
   const url = `${API_BASE}/why/stream?${params.toString()}`;
   const eventSource = new EventSource(url);
+  let completed = false;
 
   eventSource.addEventListener('tool_start', (e) => {
     try { callbacks.onToolStart?.(JSON.parse(e.data)); } catch (_) {}
@@ -103,6 +104,7 @@ export function streamWhyExplanation(location: any, observation: any, callbacks:
   });
 
   eventSource.addEventListener('complete', (e) => {
+    completed = true;
     try {
       callbacks.onComplete?.(JSON.parse(e.data));
     } catch (_) {}
@@ -110,6 +112,7 @@ export function streamWhyExplanation(location: any, observation: any, callbacks:
   });
 
   eventSource.onerror = (err) => {
+    if (completed || eventSource.readyState === EventSource.CLOSED) return;
     callbacks.onError?.(err);
     eventSource.close();
   };
