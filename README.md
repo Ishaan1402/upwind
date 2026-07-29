@@ -1,7 +1,7 @@
 # Upwind
 
-[Deploy Upwind](https://github.com/Ishaan1402/upwind/actions/workflows/deploy.yml)
-[Live Demo](https://getupwind.me)
+[![Deploy Upwind](https://github.com/Ishaan1402/upwind/actions/workflows/deploy.yml/badge.svg)](https://github.com/Ishaan1402/upwind/actions/workflows/deploy.yml)
+[![Live Demo](https://img.shields.io/badge/Live%20Demo-getupwind.me-blue?style=flat-square)](https://getupwind.me)
 
 An AQI map for the US that explains why the air is bad instead of just displaying a number. Upwind breaks down local air quality spikes, pulling satellite feeds, sensor data, and current events to rank the most likely causes.
 
