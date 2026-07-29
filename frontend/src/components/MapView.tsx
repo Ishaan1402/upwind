@@ -25,6 +25,8 @@ export const MapView: React.FC<MapViewProps> = ({ location, observation, whyData
   const mapInstance = useRef<maplibregl.Map | null>(null);
   const markerRef = useRef<maplibregl.Marker | null>(null);
   const fireMarkersRef = useRef<maplibregl.Marker[]>([]);
+  const activePopupRef = useRef<maplibregl.Popup | null>(null);
+  const activeHotspotIdRef = useRef<string | null>(null);
 
   const [webGlSupported, setWebGlSupported] = useState<boolean>(true);
 
@@ -76,6 +78,11 @@ export const MapView: React.FC<MapViewProps> = ({ location, observation, whyData
       map.addControl(new maplibregl.NavigationControl(), 'top-right');
 
       map.on('click', (e: maplibregl.MapMouseEvent) => {
+        if (activePopupRef.current) {
+          try { activePopupRef.current.remove(); } catch (_) {}
+          activePopupRef.current = null;
+          activeHotspotIdRef.current = null;
+        }
         const { lat, lng } = e.lngLat;
         onMapClick(lat, lng);
       });
@@ -102,6 +109,11 @@ export const MapView: React.FC<MapViewProps> = ({ location, observation, whyData
     }
 
     return () => {
+      if (activePopupRef.current) {
+        try { activePopupRef.current.remove(); } catch (_) {}
+        activePopupRef.current = null;
+        activeHotspotIdRef.current = null;
+      }
       if (resizeObserver) {
         try { resizeObserver.disconnect(); } catch (_) {}
       }
@@ -132,21 +144,23 @@ export const MapView: React.FC<MapViewProps> = ({ location, observation, whyData
       markerRef.current = null;
     }
 
-    // Create custom pin element
+    // Create custom pin element (ultra-simple clean colored circle)
     const el = document.createElement('div');
     el.className = 'custom-aqi-pin';
     el.style.backgroundColor = observation.category_color;
     el.style.color = observation.category_text_color;
-    el.innerHTML = `
-      <div class="pin-inner">
-        <span class="pin-aqi">${observation.aqi}</span>
-      </div>
-    `;
+    el.innerHTML = `<span class="pin-aqi">${observation.aqi}</span>`;
 
-    // Stop propagation so clicking the pin doesn't trigger map onMapClick
-    const stopProp = (e: Event) => e.stopPropagation();
-    el.addEventListener('click', stopProp);
-    el.addEventListener('touchstart', stopProp);
+    // Stop propagation and close open popup on main AQI pin click
+    const handlePinClick = (e: Event) => {
+      e.stopPropagation();
+      if (activePopupRef.current) {
+        try { activePopupRef.current.remove(); } catch (_) {}
+        activePopupRef.current = null;
+        activeHotspotIdRef.current = null;
+      }
+    };
+    el.addEventListener('click', handlePinClick);
 
     markerRef.current = new maplibregl.Marker({ element: el })
       .setLngLat([location.lon, location.lat])
@@ -164,7 +178,12 @@ export const MapView: React.FC<MapViewProps> = ({ location, observation, whyData
     if (!mapInstance.current) return;
     const map = mapInstance.current;
 
-    // Clear existing fire markers
+    // Clear existing active popup and fire markers
+    if (activePopupRef.current) {
+      try { activePopupRef.current.remove(); } catch (e) {}
+      activePopupRef.current = null;
+      activeHotspotIdRef.current = null;
+    }
     fireMarkersRef.current.forEach(m => {
       try { m.remove(); } catch (e) {}
     });
@@ -175,15 +194,52 @@ export const MapView: React.FC<MapViewProps> = ({ location, observation, whyData
       hotspots.forEach(spot => {
         const fireEl = document.createElement('div');
         fireEl.className = 'fire-hotspot-marker';
-        fireEl.title = `NASA FIRMS Hotspot (${spot.distance_km ? spot.distance_km + ' km away' : 'upwind'})`;
-        fireEl.innerHTML = '🔥';
-        fireEl.style.fontSize = '18px';
-        fireEl.style.cursor = 'pointer';
+        const distStr = spot.distance_km ? `${(spot.distance_km * 0.621371).toFixed(1)} miles away` : 'Upwind fire hotspot';
+        fireEl.title = `NASA FIRMS Hotspot (${distStr})`;
+        fireEl.innerHTML = `<svg width="13" height="13" viewBox="0 0 24 24" fill="#fb923c" stroke="#f97316" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M8.5 14.5A2.5 2.5 0 0 0 11 12c0-1.38-.5-2-1-3-1.072-2.143-.224-4.054 2-6 .5 2.5 2 4.9 4 6.5 2 1.6 3 3.5 3 5.5a7 7 0 1 1-14 0c0-1.153.433-2.294 1-3a2.5 2.5 0 0 0 2.5 3.5z"/></svg>`;
 
-        // Stop propagation so clicking a fire hotspot doesn't trigger map onMapClick
-        const stopProp = (e: Event) => e.stopPropagation();
-        fireEl.addEventListener('click', stopProp);
-        fireEl.addEventListener('touchstart', stopProp);
+        // Create interactive popup tooltip on click/tap
+        const popupContent = `
+          <div class="fire-popup-inner">
+            <div class="fire-popup-title">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="#fb923c" stroke="#f97316" stroke-width="1.5" style="display:inline-block; vertical-align:middle; margin-right:4px;"><path d="M8.5 14.5A2.5 2.5 0 0 0 11 12c0-1.38-.5-2-1-3-1.072-2.143-.224-4.054 2-6 .5 2.5 2 4.9 4 6.5 2 1.6 3 3.5 3 5.5a7 7 0 1 1-14 0c0-1.153.433-2.294 1-3a2.5 2.5 0 0 0 2.5 3.5z"/></svg>NASA FIRMS Hotspot
+            </div>
+            <div class="fire-popup-dist">${distStr}</div>
+            ${spot.frp ? `<div class="fire-popup-meta">Fire Power: ${spot.frp} MW</div>` : ''}
+          </div>
+        `;
+
+        const spotId = `${spot.lat}_${spot.lon}`;
+
+        const handleFireClick = (e: Event) => {
+          e.stopPropagation();
+
+          // Toggle close if re-clicking the active hotspot
+          if (activeHotspotIdRef.current === spotId) {
+            if (activePopupRef.current) {
+              try { activePopupRef.current.remove(); } catch (_) {}
+              activePopupRef.current = null;
+            }
+            activeHotspotIdRef.current = null;
+            return;
+          }
+
+          // Close previous active popup if a different hotspot was open
+          if (activePopupRef.current) {
+            try { activePopupRef.current.remove(); } catch (_) {}
+            activePopupRef.current = null;
+          }
+
+          const popup = new maplibregl.Popup({ offset: 12, closeButton: false })
+            .setHTML(popupContent)
+            .setLngLat([spot.lon, spot.lat])
+            .addTo(map);
+
+          activePopupRef.current = popup;
+          activeHotspotIdRef.current = spotId;
+        };
+
+        fireEl.addEventListener('click', handleFireClick);
 
         const marker = new maplibregl.Marker({ element: fireEl })
           .setLngLat([spot.lon, spot.lat])

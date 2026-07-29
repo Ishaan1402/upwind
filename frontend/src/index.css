@@ -191,18 +191,19 @@ body, html, #root {
 
 /* Custom AQI Map Pin */
 .custom-aqi-pin {
-  width: 42px;
-  height: 42px;
+  width: 34px;
+  height: 34px;
   border-radius: 50%;
   display: flex;
   align-items: center;
   justify-content: center;
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4), 0 0 0 3px rgba(255, 255, 255, 0.75);
+  border: 1px solid rgba(0, 0, 0, 0.4);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.45);
   font-weight: 800;
-  font-size: 0.95rem;
+  font-size: 0.88rem;
   cursor: pointer;
   transform: translate(-50%, -50%);
-  transition: transform 0.15s ease;
+  transition: transform 0.15s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 .custom-aqi-pin:hover {
@@ -211,17 +212,22 @@ body, html, #root {
 
 /* Fire hotspot marker */
 .fire-hotspot-marker {
-  width: 22px;
-  height: 22px;
+  width: 26px;
+  height: 26px;
   border-radius: 50%;
   display: flex;
   align-items: center;
   justify-content: center;
-  background: rgba(10, 14, 22, 0.85);
-  border: 1.5px solid var(--fire);
+  background: rgba(24, 16, 12, 0.88);
+  border: 1px solid rgba(251, 146, 60, 0.5);
   color: var(--fire);
   cursor: pointer;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
+  box-shadow: 0 0 10px rgba(251, 146, 60, 0.35), 0 2px 8px rgba(0, 0, 0, 0.4);
+  transition: transform 0.15s ease;
+}
+
+.fire-hotspot-marker:hover {
+  transform: scale(1.15);
 }
 
 /* Floating Card Overlay */
@@ -881,6 +887,43 @@ body, html, #root {
 .maplibregl-ctrl-attrib a {
   color: rgba(255, 255, 255, 0.6) !important;
   text-decoration: none !important;
+}
+
+/* MapLibre Dark Popup Styling */
+.maplibregl-popup-content {
+  background: var(--panel-bg-solid) !important;
+  border: 1px solid var(--border-color) !important;
+  border-radius: var(--radius-sm) !important;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5) !important;
+  padding: 8px 12px !important;
+}
+
+.maplibregl-popup-tip {
+  border-top-color: var(--panel-bg-solid) !important;
+  border-bottom-color: var(--panel-bg-solid) !important;
+}
+
+.fire-popup-inner {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-family: system-ui, -apple-system, sans-serif;
+}
+
+.fire-popup-title {
+  font-weight: 700;
+  font-size: 0.8rem;
+  color: #fb923c;
+}
+
+.fire-popup-dist {
+  font-size: 0.75rem;
+  color: #cbd5e1;
+}
+
+.fire-popup-meta {
+  font-size: 0.7rem;
+  color: #94a3b8;
 }
 
 /* Mobile responsive layout additions */
