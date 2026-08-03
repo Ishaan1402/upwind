@@ -89,7 +89,8 @@ async def generate_narrative_briefing(
         client = AsyncOpenAI(base_url="https://api.deepseek.com", api_key=DEEPSEEK_API_KEY)
         
         response = await client.chat.completions.create(
-            model="deepseek-chat",
+            model="deepseek-v4-flash",
+            extra_body={"thinking": {"type": "disabled"}},
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": f"Brief the user on this evidence package in a warm, light, conversational voice without headers or internal scores:\n{json.dumps(evidence_payload, indent=2)}"}
@@ -137,7 +138,8 @@ async def generate_narrative_briefing_stream(
         client = AsyncOpenAI(base_url="https://api.deepseek.com", api_key=DEEPSEEK_API_KEY)
         
         stream_response = await client.chat.completions.create(
-            model="deepseek-chat",
+            model="deepseek-v4-flash",
+            extra_body={"thinking": {"type": "disabled"}},
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": f"Brief the user on this evidence package in a warm, light, conversational voice without headers or internal scores:\n{json.dumps(evidence_payload, indent=2)}"}
