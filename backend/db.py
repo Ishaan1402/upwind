@@ -74,6 +74,20 @@ def set_cached_narrative(cache_key: str, narrative: str, payload: Dict[str, Any]
     except Exception as e:
         print(f"[SQLite Cache Write Error]: {e}")
 
+def update_cached_verdict(cache_key: str, judge_verdict: Optional[Dict[str, Any]]):
+    """Persist (or update) a judge verdict for an already-cached narrative."""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE narrative_cache SET judge_verdict_json = ? WHERE cache_key = ?",
+            (json.dumps(judge_verdict) if judge_verdict else None, cache_key),
+        )
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"[SQLite Cache Write Error]: {e}")
+
 def get_cached_geocode(query_normalized: str, max_age_days: int = 7) -> Optional[Dict[str, Any]]:
     try:
         conn = sqlite3.connect(DB_PATH)

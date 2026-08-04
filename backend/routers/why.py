@@ -20,7 +20,7 @@ from backend.engine.signals import (
 from backend.engine.score import score_hypotheses
 from backend.llm import generate_narrative_briefing, generate_narrative_briefing_stream, generate_fallback_narrative
 from backend.llm_judge import judge_narrative
-from backend.db import get_cached_narrative, set_cached_narrative
+from backend.db import get_cached_narrative, set_cached_narrative, update_cached_verdict
 
 router = APIRouter(prefix="/api", tags=["Why Attribution"])
 
@@ -32,6 +32,7 @@ async def _async_judge_streamed_narrative(evidence_payload: Dict[str, Any], full
     """Post-hoc non-blocking evaluation of streamed narrative."""
     try:
         verdict = await judge_narrative(evidence_payload, full_narrative)
+        update_cached_verdict(cache_key, verdict)
         if verdict.get("verdict") == "fail":
             print(f"[LLM Judge Stream Warning]: Streamed narrative failed judge check ({verdict.get('reasoning')}). Hallucinations: {verdict.get('hallucinations')}, Jargon: {verdict.get('leaked_jargon')}")
     except Exception as e:
@@ -159,7 +160,9 @@ async def stream_why_explanation(
             "aqi": aqi,
             "primary_pollutant": primary_pollutant or "PM2.5",
             "category": category or "Moderate",
-            "pollutants": {"PM2.5": float(aqi)}
+            # The client only reports AQI here, not a measured concentration;
+            # do not fabricate a PM2.5 value (it would be mislabeled µg/m³).
+            "pollutants": {}
         }
 
     async def sse_event_generator():
@@ -219,7 +222,7 @@ async def stream_why_explanation(
         # 5. OpenAQ Reference Monitor Concentrations Tool
         yield f"event: tool_start\ndata: {json.dumps({'step': 'openaq_monitors', 'label': TOOL_STEPS['openaq_monitors']})}\n\n"
         t0 = time.perf_counter()
-        openaq_sig = await collect_openaq_signal(lat, lon)
+        openaq_sig = await collect_openaq_signal(lat, lon, include_baselines=aqi_val > 50)
         t1 = time.perf_counter()
         openaq_trace = create_trace_step(
             "openaq_monitors",
