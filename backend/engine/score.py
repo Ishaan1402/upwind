@@ -112,7 +112,7 @@ def score_hypotheses(
         positive_fire_signals.append(f"Dense atmospheric column particle plume detected (AOD {aod_value:.2f})")
     elif light_haze_extreme_pm:
         positive_fire_signals.append(
-            f"Light atmospheric haze (AOD {aod_value:.2f}) with very unhealthy surface PM (AQI {aqi_val}) — consistent with settling smoke"
+            f"Light atmospheric haze (AOD {aod_value:.2f}) with very unhealthy surface PM (AQI {aqi_val}), consistent with settling smoke"
         )
     if has_firms_corroboration:
         loc_str = f" ({nearest_firm['distance_miles']} mi {nearest_firm['bearing']})" if nearest_firm else ""
@@ -131,11 +131,11 @@ def score_hypotheses(
     if incident_name and not has_firms_corroboration:
         if has_haze:
             open_questions.append(
-                f"Recent news mentions '{incident_name}', but no current upwind hotspots — haze may be regional/urban aerosol rather than that incident."
+                f"Recent news mentions '{incident_name}', but no current upwind hotspots; haze may be regional/urban aerosol rather than that incident."
             )
         else:
             open_questions.append(
-                f"Recent news mentions '{incident_name}', but no current upwind hotspots or atmospheric haze — may be extinguished, distant, or unrelated."
+                f"Recent news mentions '{incident_name}', but no current upwind hotspots or atmospheric haze; may be extinguished, distant, or unrelated."
             )
 
     # -------------------------------------------------------------
@@ -149,13 +149,13 @@ def score_hypotheses(
         smoke_support.append(f"Surface PM2.5/PM10 is elevated as primary pollutant (AQI {aqi_val})")
 
     if fine_dominated and pm_elevated and (aod_present or has_firms_corroboration):
-        smoke_support.append("PM is fine-particle dominated — consistent with smoke rather than coarse dust")
+        smoke_support.append("PM is fine-particle dominated, consistent with smoke rather than coarse dust")
 
     if op_present and pm_elevated and pm25_conc is not None and (aod_present or has_firms_corroboration):
         smoke_support.append(measured_line)
 
     if coarse_dominated and pm_elevated:
-        smoke_against.append("PM is coarse-particle dominated — favors dust over smoke")
+        smoke_against.append("PM is coarse-particle dominated, favoring dust over smoke")
 
     # Contradiction: Heavy column plume present but surface PM not elevated (Aloft smoke)
     if aod_value >= 0.4 and not pm_elevated:
@@ -164,14 +164,14 @@ def score_hypotheses(
 
     # Clean AOD vs elevated PM: clear column overhead favors local surface sources
     if pm_elevated and (not aod_present or aod_value < 0.2):
-        smoke_against.append("Clear column overhead (clean AOD) while surface PM is elevated — favors localized surface sources rather than smoke transport")
+        smoke_against.append("Clear column overhead (clean AOD) while surface PM is elevated, favoring localized surface sources rather than smoke transport")
 
     if firms.get("status") == "absent" and not aod_present and not incident_name:
         smoke_against.append("No active upwind fires or dense atmospheric plumes detected")
     elif aod_only_fire and pm_elevated:
-        smoke_against.append("No nearby upwind thermal hotspots — overhead haze may be urban/regional aerosol rather than verified wildfire smoke")
+        smoke_against.append("No nearby upwind thermal hotspots; overhead haze may be urban/regional aerosol rather than verified wildfire smoke")
     elif light_haze_extreme_pm:
-        smoke_against.append("No nearby thermal hotspots yet — light haze + extreme PM is suggestive but not hotspot-verified")
+        smoke_against.append("No nearby thermal hotspots yet; light haze + extreme PM is suggestive but not hotspot-verified")
 
     # Deterministic Confidence Classification
     # High requires nearby FIRMS — AOD+news alone must not crown wildfire.
@@ -215,7 +215,7 @@ def score_hypotheses(
         op_present and pm_elevated and co_ppm is not None
         and co_ppm >= OPENAQ_CO_PPM and (aod_present or has_firms_corroboration)
     ):
-        smoke_support.append("Elevated carbon monoxide alongside PM — a combustion signature consistent with smoke")
+        smoke_support.append("Elevated carbon monoxide alongside PM, a combustion signature consistent with smoke")
         smoke_score = max(smoke_score, 55)
         if smoke_conf == "low":
             smoke_conf = "medium"
@@ -295,7 +295,7 @@ def score_hypotheses(
     if pm10_primary:
         dust_support.append("PM10 (coarse particulate) is the primary reported pollutant, consistent with wind-driven dust rather than combustion smoke")
     else:
-        dust_against.append(f"Primary pollutant is {primary}, not coarse PM10 — dust is not the dominant particle fraction")
+        dust_against.append(f"Primary pollutant is {primary}, not coarse PM10; dust is not the dominant particle fraction")
 
     if is_high_wind:
         dust_support.append(f"Sustained wind speed ({wind_speed} mph) is high enough to loft soil and dust")
@@ -303,7 +303,7 @@ def score_hypotheses(
         dust_against.append(f"Wind speed ({wind_speed} mph) is below the threshold typically needed to loft significant dust")
 
     if coarse_dominated and pm_elevated:
-        dust_support.append("PM2.5 is only a small fraction of PM10 — coarse particles consistent with windblown dust")
+        dust_support.append("PM2.5 is only a small fraction of PM10, coarse particles consistent with windblown dust")
 
     if pm10_primary and is_high_wind:
         dust_conf, dust_score = "high", 85
@@ -345,16 +345,16 @@ def score_hypotheses(
     elif wind_speed is not None:
         stagnation_against.append(f"Wind speed ({wind_speed} mph) is high enough to disperse pollutants, arguing against stagnation")
     if fire_signal_count == 0:
-        stagnation_support.append("No upwind fire evidence — elevated PM is more likely local combustion/traffic trapped near the surface")
+        stagnation_support.append("No upwind fire evidence; elevated PM is more likely local combustion/traffic trapped near the surface")
     else:
-        stagnation_against.append("Active fire evidence present — elevated PM may be smoke-related rather than pure stagnation")
+        stagnation_against.append("Active fire evidence present; elevated PM may be smoke-related rather than pure stagnation")
     if boundary_layer_height_m is not None and boundary_layer_height_m < 500:
         stagnation_support.append(f"Shallow boundary layer height ({boundary_layer_height_m:.0f}m) indicates trapped near-surface air")
 
     if same_hour_anomaly:
         if is_cold and is_calm:
             stagnation_support.append(
-                "PM2.5 is well above the usual reading for this time of day — consistent with air being trapped near the surface"
+                "PM2.5 is well above the usual reading for this time of day, consistent with air being trapped near the surface"
             )
         else:
             open_questions.append(
@@ -401,7 +401,7 @@ def score_hypotheses(
         )
     elif pm_elevated and aod_only_fire and not is_dust_or_stagnation:
         urban_support.append(
-            f"PM2.5 is elevated (AQI {aqi_val}) with regional haze but no nearby fire hotspots — local urban sources remain a strong explanation"
+            f"PM2.5 is elevated (AQI {aqi_val}) with regional haze but no nearby fire hotspots; local urban sources remain a strong explanation"
         )
     elif pm_elevated:
         urban_support.append("PM is elevated, but a more specific mode (fire, dust, or stagnation) better explains it")
@@ -415,10 +415,10 @@ def score_hypotheses(
         if co_ppm is not None and co_ppm >= OPENAQ_CO_PPM:
             parts.append("combustion-related carbon monoxide")
         urban_support.append(
-            "Monitor data shows elevated " + " and ".join(parts) + " — a signature of local combustion and traffic"
+            "Monitor data shows elevated " + " and ".join(parts) + ", a signature of local combustion and traffic"
         )
     if fine_dominated and pm_elevated and not (aod_present or has_firms_corroboration):
-        urban_support.append("PM is fine-particle dominated — consistent with local combustion or traffic rather than coarse dust")
+        urban_support.append("PM is fine-particle dominated, consistent with local combustion or traffic rather than coarse dust")
 
     if op_present and pm_elevated and pm25_conc is not None and not (aod_present or has_firms_corroboration):
         urban_support.append(measured_line)
@@ -429,10 +429,10 @@ def score_hypotheses(
         urban_against.append(f"Verified fire evidence signals present ({fire_signal_count} indicator(s))")
     elif light_haze_extreme_pm:
         urban_against.append(
-            "Light atmospheric haze with very unhealthy PM — favors regional smoke settling over purely local urban emissions"
+            "Light atmospheric haze with very unhealthy PM, favoring regional smoke settling over purely local urban emissions"
         )
     elif fire_signal_count > 0 and aod_value >= 0.8:
-        urban_against.append("Heavy atmospheric particle plume present — long-range smoke may contribute")
+        urban_against.append("Heavy atmospheric particle plume present; long-range smoke may contribute")
     if is_dust_or_stagnation:
         urban_against.append("Conditions better match windblown dust or winter stagnation than generic urban/industrial PM")
 
@@ -478,7 +478,7 @@ def score_hypotheses(
         open_questions.append("Air quality index is currently in the 'Good' range (AQI ≤ 50).")
     if op_present and pm_elevated and daily_pct is not None and daily_pct >= 90:
         open_questions.append(
-            "PM2.5 today is well above this location's typical daily readings — an unusual day for this area"
+            "PM2.5 today is well above this location's typical daily readings, an unusual day for this area"
         )
 
     return hypotheses, open_questions
