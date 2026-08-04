@@ -3,11 +3,8 @@ OpenAQ API v3 integration for Upwind.
 
 Pulls raw pollutant concentrations from US EPA reference monitors only
 (monitor=true, mobile=false, iso=US). OpenAQ serves physical concentrations
-rather than AQI values, which feeds the attribution engine's signal quality.
+rather than AQI values, which supplements the attribution scoring quality.
 
-All functions degrade gracefully: missing key, timeout, HTTP error, stale
-readings, or incomplete aggregates result in None / empty results so the
-rest of the app behaves exactly as before.
 """
 
 import math
@@ -142,15 +139,16 @@ def _percent_complete(record: Dict[str, Any]) -> Optional[float]:
         return None
 
 
-async def discover_reference_monitor(lat: float, lon: float) -> Optional[Dict[str, Any]]:
+async def discover_reference_monitors(lat: float, lon: float, limit: int = 3) -> List[Dict[str, Any]]:
     """
-    Find the nearest US EPA reference monitor within 25 km of (lat, lon).
+    Find the nearest US EPA reference monitors within 25 km of (lat, lon),
+    sorted by distance.
 
-    Returns monitor metadata or None when no monitor is nearby, the key is
-    missing, or the request fails.
+    Returns a list of candidate monitor metadata (nearest first), or an empty
+    list when no monitor is nearby, the key is missing, or the request fails.
     """
     if not OPENAQ_API_KEY:
-        return None
+        return []
 
     params = {
         "coordinates": f"{lat},{lon}",
@@ -170,30 +168,32 @@ async def discover_reference_monitor(lat: float, lon: float) -> Optional[Dict[st
         return None
 
     results = data.get("results", []) if isinstance(data, dict) else []
-    best, best_dist = None, None
+    candidates = []
     for loc in results:
         coords = loc.get("coordinates") or {}
         lat2, lon2 = coords.get("latitude"), coords.get("longitude")
         if lat2 is None or lon2 is None:
             continue
         dist = haversine_km(lat, lon, float(lat2), float(lon2))
-        if best_dist is None or dist < best_dist:
-            best_dist = dist
-            best = loc
+        provider = loc.get("provider") or {}
+        owner = loc.get("owner") or {}
+        candidates.append({
+            "location_id": loc.get("id"),
+            "name": loc.get("name"),
+            "distance_km": round(dist, 2),
+            "timezone": loc.get("timezone"),
+            "provider": provider.get("name") if isinstance(provider, dict) else loc.get("provider_name"),
+            "owner": owner.get("name") if isinstance(owner, dict) else loc.get("owner_name"),
+        })
 
-    if best is None or best_dist is None:
-        return None
+    candidates.sort(key=lambda m: m["distance_km"])
+    return candidates[:limit]
 
-    provider = best.get("provider") or {}
-    owner = best.get("owner") or {}
-    return {
-        "location_id": best.get("id"),
-        "name": best.get("name"),
-        "distance_km": round(best_dist, 2),
-        "timezone": best.get("timezone"),
-        "provider": provider.get("name") if isinstance(provider, dict) else best.get("provider_name"),
-        "owner": owner.get("name") if isinstance(owner, dict) else best.get("owner_name"),
-    }
+
+async def discover_reference_monitor(lat: float, lon: float) -> Optional[Dict[str, Any]]:
+    """Find the single nearest US EPA reference monitor within 25 km."""
+    monitors = await discover_reference_monitors(lat, lon, limit=1)
+    return monitors[0] if monitors else None
 
 
 async def fetch_location_sensors(location_id: int) -> Dict[int, Dict[str, Any]]:

@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, Mock, patch
 import pytest
 
 from backend.services.openaq import (
+    discover_reference_monitors,
     discover_reference_monitor,
     fetch_daily_baseline,
     fetch_latest,
@@ -99,6 +100,42 @@ def test_discover_reference_monitor_picks_nearest_and_filters():
     assert params["mobile"] == "false"
     assert params["iso"] == "US"
     assert params["radius"] == "25000"
+
+
+def test_discover_reference_monitors_returns_sorted_candidates():
+    client = make_client({
+        "v3/locations": make_response(200, {
+            "results": [
+                {
+                    "id": 333,
+                    "name": "Farthest",
+                    "coordinates": {"latitude": 35.0, "longitude": -118.0},
+                    "timezone": "America/Los_Angeles",
+                    "provider": {"name": "US EPA"},
+                },
+                {
+                    "id": 111,
+                    "name": "Nearest",
+                    "coordinates": {"latitude": 34.02, "longitude": -118.0},
+                    "timezone": "America/Los_Angeles",
+                    "provider": {"name": "US EPA"},
+                },
+                {
+                    "id": 222,
+                    "name": "Middle",
+                    "coordinates": {"latitude": 34.5, "longitude": -118.0},
+                    "timezone": "America/Los_Angeles",
+                    "provider": {"name": "US EPA"},
+                },
+            ]
+        }),
+    })
+    with patch("backend.services.openaq.httpx.AsyncClient", return_value=client), \
+         patch("backend.services.openaq.OPENAQ_API_KEY", "test-key"):
+        monitors = asyncio.run(discover_reference_monitors(34.0, -118.0, limit=3))
+
+    assert [m["location_id"] for m in monitors] == [111, 222, 333]
+    assert monitors[0]["distance_km"] < monitors[1]["distance_km"] < monitors[2]["distance_km"]
 
 
 def test_discover_reference_monitor_degrades():

@@ -5,7 +5,7 @@ from backend.services.aod import fetch_aod_signal
 from backend.services.firms import fetch_firms_hotspots
 from backend.services.incident_search import search_fire_incident_name
 from backend.services.openaq import (
-    discover_reference_monitor,
+    discover_reference_monitors,
     fetch_latest,
     fetch_location_sensors,
     fetch_daily_baseline,
@@ -49,16 +49,33 @@ async def collect_openaq_signal(lat: float, lon: float) -> Dict[str, Any]:
     Never raises.
     """
     try:
-        monitor = await discover_reference_monitor(lat, lon)
-        if monitor is None:
+        candidates = await discover_reference_monitors(lat, lon, limit=3)
+        if not candidates:
             return _openaq_unavailable_signal(
                 "No EPA reference monitor within 25 km (or OpenAQ key not configured)"
             )
 
+        # Freshness-aware selection: prefer the nearest monitor with live PM2.5,
+        # falling back to the nearest monitor with any fresh readings. A nearby
+        # monitor with a dead feed must not block a slightly farther live one.
+        monitor = None
+        readings: Dict[str, Any] = {}
+        fallback_monitor, fallback_readings = None, {}
+        for candidate in candidates:
+            candidate_readings = await fetch_latest(candidate["location_id"])
+            if not candidate_readings:
+                continue
+            if fallback_monitor is None:
+                fallback_monitor, fallback_readings = candidate, candidate_readings
+            if "pm25" in candidate_readings:
+                monitor, readings = candidate, candidate_readings
+                break
+        if monitor is None:
+            monitor, readings = fallback_monitor, fallback_readings
+        if monitor is None:
+            return _openaq_unavailable_signal("No fresh readings from nearby EPA reference monitors")
+
         location_id = monitor["location_id"]
-        readings = await fetch_latest(location_id)
-        if not readings:
-            return _openaq_unavailable_signal("No fresh readings from the nearest EPA reference monitor")
 
         pm25 = readings.get("pm25")
         pm10 = readings.get("pm10")
@@ -76,6 +93,7 @@ async def collect_openaq_signal(lat: float, lon: float) -> Dict[str, Any]:
             "so2_ppb": None,
             "pm25_pm10_ratio": None,
             "monitor": {
+                "location_id": monitor.get("location_id"),
                 "name": monitor.get("name"),
                 "distance_km": monitor.get("distance_km"),
                 "provider": monitor.get("provider"),
@@ -261,6 +279,8 @@ async def assemble_evidence_signals(
         "pm25_primary": is_pm25_primary,
         "elevated": is_pm_elevated,
         "pm25_value": pm25_val,
+        "pm25_conc": openaq_sig.get("pm25"),
+        "pm10_conc": openaq_sig.get("pm10"),
         "details": f"Primary pollutant: {primary_pollutant} (AQI {aqi_val})"
     })
 

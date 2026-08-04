@@ -179,6 +179,7 @@ def test_openaq_fine_ratio_boosts_smoke_with_plume_evidence():
     hypotheses, _ = score_hypotheses(observation, signals)
     smoke_h = next(h for h in hypotheses if h["id"] == "wildfire_smoke")
     assert any("fine-particle dominated" in s for s in smoke_h["support"])
+    assert any("PM2.5 measured at 17" in s for s in smoke_h["support"])
     assert smoke_h["score"] >= 60
 
 
@@ -191,6 +192,7 @@ def test_openaq_fine_ratio_clean_column_favors_urban():
     hypotheses, _ = score_hypotheses(observation, signals)
     urban_h = next(h for h in hypotheses if h["id"] == "urban_industrial_pm")
     assert any("fine-particle dominated" in s for s in urban_h["support"])
+    assert any("PM2.5 measured at 22" in s for s in urban_h["support"])
     assert urban_h["score"] >= 55
     assert hypotheses[0]["id"] == "urban_industrial_pm"
 

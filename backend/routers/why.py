@@ -273,6 +273,8 @@ async def stream_why_explanation(
                 "pm10_primary": is_pm10_primary,
                 "pm25_primary": is_pm25_primary,
                 "elevated": is_pm_elevated,
+                "pm25_conc": openaq_sig.get("pm25"),
+                "pm10_conc": openaq_sig.get("pm10"),
                 "details": f"Primary pollutant: {primary_pollutant} (AQI {aqi_val})"
             },
             {

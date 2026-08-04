@@ -145,6 +145,9 @@ def score_hypotheses(
     if fine_dominated and pm_elevated and (aod_present or has_firms_corroboration):
         smoke_support.append("PM is fine-particle dominated — consistent with smoke rather than coarse dust")
 
+    if op_present and pm_elevated and pm25_conc is not None and (aod_present or has_firms_corroboration):
+        smoke_support.append(f"PM2.5 measured at {pm25_conc:.0f} µg/m³ at the nearest EPA monitor")
+
     if coarse_dominated and pm_elevated:
         smoke_against.append("PM is coarse-particle dominated — favors dust over smoke")
 
@@ -410,6 +413,9 @@ def score_hypotheses(
         )
     if fine_dominated and pm_elevated and not (aod_present or has_firms_corroboration):
         urban_support.append("PM is fine-particle dominated — consistent with local combustion or traffic rather than coarse dust")
+
+    if op_present and pm_elevated and pm25_conc is not None and not (aod_present or has_firms_corroboration):
+        urban_support.append(f"PM2.5 measured at {pm25_conc:.0f} µg/m³ at the nearest EPA monitor")
 
     if not pm_elevated:
         urban_against.append("Surface PM is within satisfactory/normal range")
