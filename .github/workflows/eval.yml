@@ -1,0 +1,107 @@
+name: Narrative Eval
+
+on:
+  schedule:
+    # Daily 06:00 UTC regression eval of the fixed scenario corpus.
+    - cron: '0 6 * * *'
+  workflow_dispatch:
+    inputs:
+      judge_model:
+        description: 'Candidate judge model to compare against the default'
+        required: false
+        default: 'llama-3.1-8b-instant'
+      min_pass:
+        description: 'Minimum scenarios that must pass (0-6) before the job fails'
+        required: false
+        default: '4'
+
+jobs:
+  corpus-eval:
+    name: Corpus + judge-compare
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+          cache: 'pip'
+          cache-dependency-path: backend/requirements.txt
+
+      - name: Install dependencies
+        run: pip install -r backend/requirements.txt
+
+      - name: Check API keys
+        env:
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+        run: |
+          test -n "$DEEPSEEK_API_KEY" || { echo "::error::DEEPSEEK_API_KEY secret is not set in GitHub"; exit 1; }
+          test -n "$GROQ_API_KEY" || { echo "::error::GROQ_API_KEY secret is not set in GitHub"; exit 1; }
+
+      - name: Run corpus eval
+        env:
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+        run: python -m backend.eval corpus --out corpus.json
+
+      - name: Judge compare
+        env:
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+        run: python -m backend.eval judge-compare --model "${{ inputs.judge_model || 'llama-3.1-8b-instant' }}" --out compare.json
+
+      - name: Check pass-rate threshold and summarize
+        env:
+          MIN_PASS: ${{ inputs.min_pass || '4' }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+
+          results = json.load(open("corpus.json"))
+          passed = sum(1 for r in results if r["verdict"].get("verdict") == "pass")
+          min_pass = int(os.environ["MIN_PASS"])
+          rows = "".join(
+              f"| {r['scenario']} | {r['verdict'].get('verdict')} | "
+              f"{r['verdict'].get('judge_model')} | "
+              f"{(r['verdict'].get('reasoning') or '')[:80].replace(chr(10), ' ')} |\n"
+              for r in results
+          )
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as f:
+              f.write(f"## Narrative eval: {passed}/{len(results)} passed\n\n")
+              f.write("| scenario | verdict | judge model | reasoning |\n|---|---|---|---|\n")
+              f.write(rows)
+          print(f"passed={passed}/{len(results)} (minimum {min_pass})")
+          if passed < min_pass:
+              print("::error::Narrative pass rate below threshold")
+              raise SystemExit(1)
+          PY
+
+      - name: Upload eval artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-results
+          path: |
+            corpus.json
+            compare.json
+
+  production-stats:
+    name: Production stats (VM cache)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Collect eval stats from VM
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script: |
+            set -e
+            cd ~/upwind
+            echo "---- verdict stats ----"
+            ./venv/bin/python -m backend.eval stats
+            echo "---- rule-judge ----"
+            ./venv/bin/python -m backend.eval rule-judge
