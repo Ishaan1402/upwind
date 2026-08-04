@@ -12,7 +12,7 @@ JUDGE_SYSTEM_PROMPT = """You are a strict fact-checker reviewing an AI-generated
 
 Check the narrative against these rules:
 1. Grounding: every factual claim (fire names, locations, pollutant levels, causes) must be traceable to the provided signals/hypotheses/open_questions. Flag anything invented.
-2. No leaked jargon: the narrative must not contain raw technical terms like "AOD", "FIRMS", "HMS", "hypothesis score", or numeric confidence percentages.
+2. No leaked jargon: the narrative must not contain raw technical terms like "AOD", "FIRMS", "HMS", "OpenAQ", "hypothesis score", numeric confidence percentages, or raw units like "µg/m³", "ppb", "ppm".
 3. No headers/titles: no "**Briefing:**", no markdown headers, no dates.
 4. Structure: should read as 2 short paragraphs plus a brief actionable health tip at the end.
 
@@ -71,6 +71,7 @@ async def judge_narrative(evidence_payload: Dict[str, Any], narrative: str) -> D
                     raise ValueError("Could not parse JSON response from judge")
 
             verdict.setdefault("verdict", "unknown")
+            verdict["judge_model"] = model
             return verdict
         except Exception as e:
             last_error = e
