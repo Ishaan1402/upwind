@@ -73,6 +73,12 @@ def score_hypotheses(
     same_hour_pct = openaq.get("same_hour_percentile")
     same_hour_median = openaq.get("same_hour_median")
     daily_pct = openaq.get("daily_percentile")
+    openaq_dist_km = (openaq.get("monitor") or {}).get("distance_km")
+    measured_line = None
+    if pm25_conc is not None:
+        measured_line = f"PM2.5 measured at {pm25_conc:.0f} µg/m³ at an EPA monitor"
+        if openaq_dist_km is not None:
+            measured_line += f" {openaq_dist_km:.0f} km from here"
 
     fine_dominated = op_present and pm_ratio is not None and pm_ratio >= OPENAQ_SMOKE_RATIO_MIN
     coarse_dominated = op_present and pm_ratio is not None and pm_ratio < OPENAQ_DUST_RATIO_MAX
@@ -146,7 +152,7 @@ def score_hypotheses(
         smoke_support.append("PM is fine-particle dominated — consistent with smoke rather than coarse dust")
 
     if op_present and pm_elevated and pm25_conc is not None and (aod_present or has_firms_corroboration):
-        smoke_support.append(f"PM2.5 measured at {pm25_conc:.0f} µg/m³ at the nearest EPA monitor")
+        smoke_support.append(measured_line)
 
     if coarse_dominated and pm_elevated:
         smoke_against.append("PM is coarse-particle dominated — favors dust over smoke")
@@ -415,7 +421,7 @@ def score_hypotheses(
         urban_support.append("PM is fine-particle dominated — consistent with local combustion or traffic rather than coarse dust")
 
     if op_present and pm_elevated and pm25_conc is not None and not (aod_present or has_firms_corroboration):
-        urban_support.append(f"PM2.5 measured at {pm25_conc:.0f} µg/m³ at the nearest EPA monitor")
+        urban_support.append(measured_line)
 
     if not pm_elevated:
         urban_against.append("Surface PM is within satisfactory/normal range")

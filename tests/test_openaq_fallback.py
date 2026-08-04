@@ -61,6 +61,23 @@ def test_prefers_monitor_with_live_pm25_over_any_readings():
     assert signal["pm25"] == 9.5
 
 
+def test_prefers_monitor_with_both_pm_fractions_for_ratio():
+    pm25_only = _candidate(111, "PM2.5 Only")
+    full_site = _candidate(222, "Full Site")
+    pm25 = {"value": 10.0, "unit": "µg/m³", "as_of": "2026-08-04T19:00:00+00:00"}
+    signal = _run(
+        [pm25_only, full_site],
+        [
+            _readings(pm25=pm25),
+            _readings(pm25=pm25, pm10={"value": 25.0, "unit": "µg/m³", "as_of": "2026-08-04T19:00:00+00:00"}),
+        ],
+    )
+
+    assert signal["status"] == "present"
+    assert signal["monitor"]["location_id"] == 222
+    assert signal["pm25_pm10_ratio"] == 0.4
+
+
 def test_unavailable_when_no_candidate_has_fresh_readings():
     signal = _run([_candidate(111), _candidate(222)], [{}, {}])
 

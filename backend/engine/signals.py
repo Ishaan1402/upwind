@@ -55,11 +55,14 @@ async def collect_openaq_signal(lat: float, lon: float) -> Dict[str, Any]:
                 "No EPA reference monitor within 25 km (or OpenAQ key not configured)"
             )
 
-        # Freshness-aware selection: prefer the nearest monitor with live PM2.5,
-        # falling back to the nearest monitor with any fresh readings. A nearby
-        # monitor with a dead feed must not block a slightly farther live one.
+        # Freshness-aware selection among candidates (nearest-first within 25 km):
+        # 1) nearest with BOTH live PM2.5 and PM10 (enables the dust/smoke ratio),
+        # 2) else nearest with live PM2.5,
+        # 3) else nearest with any fresh readings.
+        # A nearby monitor with a dead feed must not block a live one.
         monitor = None
         readings: Dict[str, Any] = {}
+        pm25_monitor, pm25_readings = None, {}
         fallback_monitor, fallback_readings = None, {}
         for candidate in candidates:
             candidate_readings = await fetch_latest(candidate["location_id"])
@@ -67,9 +70,13 @@ async def collect_openaq_signal(lat: float, lon: float) -> Dict[str, Any]:
                 continue
             if fallback_monitor is None:
                 fallback_monitor, fallback_readings = candidate, candidate_readings
-            if "pm25" in candidate_readings:
+            if "pm25" in candidate_readings and "pm10" in candidate_readings:
                 monitor, readings = candidate, candidate_readings
                 break
+            if "pm25" in candidate_readings and pm25_monitor is None:
+                pm25_monitor, pm25_readings = candidate, candidate_readings
+        if monitor is None and pm25_monitor is not None:
+            monitor, readings = pm25_monitor, pm25_readings
         if monitor is None:
             monitor, readings = fallback_monitor, fallback_readings
         if monitor is None:
@@ -104,7 +111,7 @@ async def collect_openaq_signal(lat: float, lon: float) -> Dict[str, Any]:
             "same_hour_percentile": None,
             "same_hour_median": None,
             "details": (
-                f"Nearest EPA reference monitor {monitor.get('name')} "
+                f"Nearest EPA monitor with live readings: {monitor.get('name')} "
                 f"({monitor.get('distance_km')} km away)"
             ),
         }
