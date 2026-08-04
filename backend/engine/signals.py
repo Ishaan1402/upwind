@@ -4,12 +4,21 @@ from backend.services.openmeteo import fetch_openmeteo_weather
 from backend.services.aod import fetch_aod_signal
 from backend.services.firms import fetch_firms_hotspots
 from backend.services.incident_search import search_fire_incident_name
+from backend.services.openaq import (
+    discover_reference_monitor,
+    fetch_latest,
+    fetch_location_sensors,
+    fetch_daily_baseline,
+    fetch_same_hour_baseline,
+    sensor_id_for_parameter,
+)
 
 TOOL_STEPS = {
     "weather_vector": "Calculating Open-Meteo wind trajectory & temperature",
     "aod_density": "Reading CAMS Aerosol Optical Depth (AOD) column density",
     "firms_scan": "Scanning NASA FIRMS thermal hotspot clusters upwind",
     "web_search": "Searching public news & active incident feeds (Web Search)",
+    "openaq_monitors": "Reading EPA monitor concentrations (OpenAQ)",
     "score_hypotheses": "Scoring attribution hypotheses (Evidence Matrix)"
 }
 
@@ -20,6 +29,94 @@ def create_trace_step(step: str, duration_ms: float, status: str = "done") -> Di
         "duration_ms": max(0.1, round(duration_ms, 1)),
         "status": status
     }
+
+
+def _openaq_unavailable_signal(detail: str) -> Dict[str, Any]:
+    return {
+        "id": "openaq_concentrations",
+        "label": "Local Monitor Concentrations (OpenAQ)",
+        "status": "unavailable",
+        "details": detail,
+    }
+
+
+async def collect_openaq_signal(lat: float, lon: float) -> Dict[str, Any]:
+    """
+    Gather OpenAQ reference-monitor concentrations for attribution.
+
+    Only fresh (<=3h), US reference-monitor readings are included; anything
+    else results in an "unavailable" signal so scoring behaves as before.
+    Never raises.
+    """
+    try:
+        monitor = await discover_reference_monitor(lat, lon)
+        if monitor is None:
+            return _openaq_unavailable_signal(
+                "No EPA reference monitor within 25 km (or OpenAQ key not configured)"
+            )
+
+        location_id = monitor["location_id"]
+        readings = await fetch_latest(location_id)
+        if not readings:
+            return _openaq_unavailable_signal("No fresh readings from the nearest EPA reference monitor")
+
+        pm25 = readings.get("pm25")
+        pm10 = readings.get("pm10")
+        as_of = pm25["as_of"] if pm25 else next(iter(readings.values()))["as_of"]
+
+        signal: Dict[str, Any] = {
+            "id": "openaq_concentrations",
+            "label": "Local Monitor Concentrations (OpenAQ)",
+            "status": "present",
+            "pm25": pm25["value"] if pm25 else None,
+            "pm10": pm10["value"] if pm10 else None,
+            "o3_ppb": None,
+            "no2_ppb": None,
+            "co_ppm": None,
+            "so2_ppb": None,
+            "pm25_pm10_ratio": None,
+            "monitor": {
+                "name": monitor.get("name"),
+                "distance_km": monitor.get("distance_km"),
+                "provider": monitor.get("provider"),
+                "owner": monitor.get("owner"),
+            },
+            "as_of": as_of,
+            "daily_percentile": None,
+            "same_hour_percentile": None,
+            "same_hour_median": None,
+            "details": (
+                f"Nearest EPA reference monitor {monitor.get('name')} "
+                f"({monitor.get('distance_km')} km away)"
+            ),
+        }
+
+        if pm25 and pm10 and pm10["value"] > 0:
+            signal["pm25_pm10_ratio"] = round(pm25["value"] / pm10["value"], 2)
+
+        for key, param in (("o3_ppb", "o3"), ("no2_ppb", "no2"), ("co_ppm", "co"), ("so2_ppb", "so2")):
+            reading = readings.get(param)
+            if reading:
+                signal[key] = reading["value"]
+
+        sensors_map = await fetch_location_sensors(location_id)
+        pm25_sensor_id = sensor_id_for_parameter(sensors_map, "pm25")
+        if pm25_sensor_id is not None and pm25:
+            daily = await fetch_daily_baseline(pm25_sensor_id)
+            if daily:
+                signal["daily_percentile"] = daily["percentile"]
+            same_hour = await fetch_same_hour_baseline(
+                pm25_sensor_id, monitor.get("timezone"), pm25["value"]
+            )
+            if same_hour:
+                signal["same_hour_percentile"] = same_hour["percentile"]
+                signal["same_hour_median"] = same_hour["median"]
+
+        return signal
+    except Exception as e:
+        print(f"[OpenAQ Service Error]: {e}")
+        return _openaq_unavailable_signal("OpenAQ concentration feed unavailable")
+
 
 async def assemble_evidence_signals(
     location: Dict[str, Any],
@@ -83,6 +180,16 @@ async def assemble_evidence_signals(
     t1 = time.perf_counter()
 
     execution_trace.append(create_trace_step("web_search", (t1 - t0) * 1000, "done" if incident_name else "absent"))
+
+    # Step 5: OpenAQ Reference Monitor Concentrations
+    t0 = time.perf_counter()
+    openaq_sig = await collect_openaq_signal(lat, lon)
+    t1 = time.perf_counter()
+    execution_trace.append(create_trace_step(
+        "openaq_monitors",
+        (t1 - t0) * 1000,
+        "done" if openaq_sig.get("status") == "present" else "warning"
+    ))
 
     signals = []
 
@@ -170,5 +277,7 @@ async def assemble_evidence_signals(
         "temperature_f": temp_f,
         "details": f"O3 Primary: {is_o3_primary}, Temperature: {f'{temp_f}°F' if temp_f else 'N/A'}"
     })
+
+    signals.append(openaq_sig)
 
     return signals, execution_trace

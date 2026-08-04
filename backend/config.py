@@ -10,6 +10,7 @@ def _clean_key(key: str) -> str:
     return cleaned
 
 AIRNOW_KEY = _clean_key(os.getenv("AIRNOW_KEY", ""))
+OPENAQ_API_KEY = _clean_key(os.getenv("OPENAQ_API_KEY", ""))
 FIRMS_MAP_KEY = _clean_key(os.getenv("FIRMS_MAP_KEY", ""))
 DEEPSEEK_API_KEY = _clean_key(os.getenv("DEEPSEEK_API_KEY", ""))
 GROQ_API_KEY = _clean_key(os.getenv("GROQ_API_KEY", ""))

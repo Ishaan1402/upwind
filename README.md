@@ -25,7 +25,7 @@ An AQI map for the US that explains why the air is bad instead of just displayin
 
 - **Backend:** Python 3.11, FastAPI, SQLite
 - **Frontend:** React 18, Vite, MapLibre GL / Leaflet
-- **Data Sources:** [AirNow API](https://www.airnow.gov/), [Open-Meteo](https://github.com/open-meteo/open-meteo), [NASA FIRMS Thermal Hotspots](https://firms.modaps.eosdis.nasa.gov/map)
+- **Data Sources:** [AirNow API](https://www.airnow.gov/), [OpenAQ](https://openaq.org/), [Open-Meteo](https://github.com/open-meteo/open-meteo), [NASA FIRMS Thermal Hotspots](https://firms.modaps.eosdis.nasa.gov/map)
 
 ---
 
@@ -39,6 +39,7 @@ Copy `.env.example` to `.env` before running:
 | Variable                 | Type     | Description                              |
 | ------------------------ | -------- | ---------------------------------------- |
 | `AIRNOW_KEY`             | Optional | Primary US monitor data feed             |
+| `OPENAQ_API_KEY`         | Optional | EPA reference-monitor concentrations (OpenAQ v3) |
 | `FIRMS_MAP_KEY`          | Optional | NASA satellite thermal hotspot detection |
 | `DEEPSEEK_API_KEY`       | Optional | My briefing LLM of choice                |
 | `GROQ_API_KEY`           | Optional | LLM Judge                                |

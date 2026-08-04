@@ -11,7 +11,12 @@ from backend.services.openmeteo import fetch_openmeteo_weather, fetch_openmeteo_
 from backend.services.aod import fetch_aod_signal
 from backend.services.firms import fetch_firms_hotspots
 from backend.services.incident_search import search_fire_incident_name
-from backend.engine.signals import assemble_evidence_signals, TOOL_STEPS, create_trace_step
+from backend.engine.signals import (
+    assemble_evidence_signals,
+    TOOL_STEPS,
+    create_trace_step,
+    collect_openaq_signal,
+)
 from backend.engine.score import score_hypotheses
 from backend.llm import generate_narrative_briefing, generate_narrative_briefing_stream, generate_fallback_narrative
 from backend.llm_judge import judge_narrative
@@ -211,6 +216,19 @@ async def stream_why_explanation(
         execution_trace.append(web_trace)
         yield f"event: tool_done\ndata: {json.dumps(web_trace)}\n\n"
 
+        # 5. OpenAQ Reference Monitor Concentrations Tool
+        yield f"event: tool_start\ndata: {json.dumps({'step': 'openaq_monitors', 'label': TOOL_STEPS['openaq_monitors']})}\n\n"
+        t0 = time.perf_counter()
+        openaq_sig = await collect_openaq_signal(lat, lon)
+        t1 = time.perf_counter()
+        openaq_trace = create_trace_step(
+            "openaq_monitors",
+            (t1 - t0) * 1000,
+            "done" if openaq_sig.get("status") == "present" else "warning"
+        )
+        execution_trace.append(openaq_trace)
+        yield f"event: tool_done\ndata: {json.dumps(openaq_trace)}\n\n"
+
         boundary_layer_height_m = weather.get("boundary_layer_height_m") if weather else None
         is_pm10_primary = "PM10" in primary_pollutant
         is_pm25_primary = is_pm_primary and not is_pm10_primary
@@ -265,7 +283,8 @@ async def stream_why_explanation(
                 "hot_day": bool(temp_f and temp_f >= 85),
                 "temperature_f": temp_f,
                 "details": f"Temperature: {temp_f}°F" if temp_f else "N/A"
-            }
+            },
+            openaq_sig
         ]
 
         # 5. Score Hypotheses Tool

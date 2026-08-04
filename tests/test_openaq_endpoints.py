@@ -1,0 +1,113 @@
+"""Endpoint tests verifying OpenAQ signal wiring in both /api/why paths."""
+
+import json
+from unittest.mock import AsyncMock, patch
+
+from fastapi.testclient import TestClient
+
+from tests.fixtures import SMOKE_LOCATION
+
+PRESENT_SIGNAL = {
+    "id": "openaq_concentrations",
+    "label": "Local Monitor Concentrations (OpenAQ)",
+    "status": "present",
+    "pm25": 18.0,
+    "pm10": 25.0,
+    "o3_ppb": 40.0,
+    "no2_ppb": 12.0,
+    "co_ppm": 0.5,
+    "so2_ppb": 3.0,
+    "pm25_pm10_ratio": 0.72,
+    "monitor": {"name": "Downtown", "distance_km": 2.3, "provider": "US EPA", "owner": "State Agency"},
+    "as_of": "2026-08-04T12:00:00+00:00",
+    "daily_percentile": 95.0,
+    "same_hour_percentile": 90.0,
+    "same_hour_median": 8.0,
+    "details": "Nearest EPA reference monitor Downtown (2.3 km away)",
+}
+
+WEATHER = {
+    "wind_speed_mph": 5.0,
+    "wind_direction_deg": 180.0,
+    "temperature_f": 70.0,
+    "boundary_layer_height_m": 900.0,
+}
+
+AOD_RESULT = {"status": "absent", "density": None, "aod_value": 0.1, "details": "clear"}
+FIRMS_RESULT = {
+    "status": "absent",
+    "count": 0,
+    "total_count": 0,
+    "nearest": None,
+    "hotspots": [],
+    "alignment": None,
+    "details": "none",
+}
+
+
+def test_why_includes_openaq_signal_and_trace_step():
+    from backend.main import app
+
+    with patch("backend.engine.signals.fetch_openmeteo_weather", new_callable=AsyncMock, return_value=WEATHER), \
+         patch("backend.engine.signals.fetch_aod_signal", new_callable=AsyncMock, return_value=AOD_RESULT), \
+         patch("backend.engine.signals.fetch_firms_hotspots", new_callable=AsyncMock, return_value=FIRMS_RESULT), \
+         patch("backend.engine.signals.search_fire_incident_name", new_callable=AsyncMock, return_value=None), \
+         patch("backend.engine.signals.collect_openaq_signal", new_callable=AsyncMock, return_value=PRESENT_SIGNAL), \
+         patch("backend.routers.why.generate_narrative_briefing", new_callable=AsyncMock, return_value="test narrative"), \
+         patch("backend.routers.why.judge_narrative", new_callable=AsyncMock, return_value={"verdict": "pass"}), \
+         patch("backend.routers.why.get_cached_narrative", return_value=None), \
+         patch("backend.routers.why.set_cached_narrative", return_value=None):
+        with TestClient(app) as client:
+            resp = client.post(
+                "/api/why",
+                json={
+                    "location": SMOKE_LOCATION,
+                    "observation": {"aqi": 85, "primary_pollutant": "PM2.5", "category": "Moderate"},
+                },
+            )
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert any(s["id"] == "openaq_concentrations" and s["status"] == "present" for s in data["signals"])
+    assert any(t["step"] == "openaq_monitors" for t in data["execution_trace"])
+
+
+def test_stream_emits_openaq_events_and_signal():
+    from backend.main import app
+
+    async def fake_stream(*args, **kwargs):
+        yield "test narrative"
+
+    with patch("backend.routers.why.fetch_openmeteo_weather", new_callable=AsyncMock, return_value=WEATHER), \
+         patch("backend.routers.why.fetch_aod_signal", new_callable=AsyncMock, return_value=AOD_RESULT), \
+         patch("backend.routers.why.fetch_firms_hotspots", new_callable=AsyncMock, return_value=FIRMS_RESULT), \
+         patch("backend.routers.why.search_fire_incident_name", new_callable=AsyncMock, return_value=None), \
+         patch("backend.routers.why.collect_openaq_signal", new_callable=AsyncMock, return_value=PRESENT_SIGNAL), \
+         patch("backend.routers.why.generate_narrative_briefing_stream", side_effect=fake_stream), \
+         patch("backend.routers.why.get_cached_narrative", return_value=None), \
+         patch("backend.routers.why.set_cached_narrative", return_value=None), \
+         patch("backend.routers.why.judge_narrative", new_callable=AsyncMock, return_value={"verdict": "pass"}):
+        with TestClient(app) as client:
+            with client.stream(
+                "GET",
+                "/api/why/stream?lat=34.05&lon=-118.24&zip_code=90012&city=Los+Angeles&state=CA"
+                "&aqi=85&primary_pollutant=PM2.5&category=Moderate",
+            ) as resp:
+                assert resp.status_code == 200
+                events = {}
+                current_event = None
+                for line in resp.iter_lines():
+                    if line.startswith("event:"):
+                        current_event = line.split(":", 1)[1].strip()
+                    elif line.startswith("data:") and current_event:
+                        payload = json.loads(line.split(":", 1)[1].strip())
+                        events.setdefault(current_event, []).append(payload)
+
+    starts = [p["step"] for p in events.get("tool_start", [])]
+    dones = [p["step"] for p in events.get("tool_done", [])]
+    assert "openaq_monitors" in starts
+    assert "openaq_monitors" in dones
+
+    signals_ready = events.get("signals_ready", [])
+    assert signals_ready
+    assert any(s["id"] == "openaq_concentrations" for s in signals_ready[0]["signals"])

@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import type { LocationInfo, ObservationInfo, SignalItem, HypothesisItem } from '../types/aqi';
 import { streamWhyExplanation } from '../services/api';
-import { X, AlertCircle, Sparkles, CheckCircle2, XCircle, Loader2, Radio, Flame, Wind, Cpu, Search, ChevronDown, ChevronUp, Circle } from 'lucide-react';
+import { X, AlertCircle, Sparkles, CheckCircle2, XCircle, Loader2, Radio, Flame, Wind, Cpu, Search, Gauge, ChevronDown, ChevronUp, Circle } from 'lucide-react';
 
 // Open Questions is deprecated for now
 interface WhyDrawerProps {
@@ -26,6 +26,7 @@ const DEFAULT_STEPS: InternalToolStep[] = [
   { step: 'aod_density', label: 'Aerosol density (AOD)', status: 'pending', icon: Radio },
   { step: 'firms_scan', label: 'Upwind fire hotspots', status: 'pending', icon: Flame },
   { step: 'web_search', label: 'News & incident search', status: 'pending', icon: Search },
+  { step: 'openaq_monitors', label: 'Monitor concentrations', status: 'pending', icon: Gauge },
   { step: 'score_hypotheses', label: 'Scoring hypotheses', status: 'pending', icon: Cpu }
 ];
 
@@ -377,6 +378,13 @@ export const WhyDrawer: React.FC<WhyDrawerProps> = ({
                   </div>
                 </div>
               )}
+            </div>
+          )}
+
+          {/* Data attribution footnote (only when OpenAQ monitor data is live) */}
+          {signals.some(s => s.id === 'openaq_concentrations' && s.status === 'present') && (
+            <div className="data-attribution-note">
+              Data: EPA AirNow; monitor concentrations via OpenAQ
             </div>
           )}
         </div>

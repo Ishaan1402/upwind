@@ -1,5 +1,17 @@
 from typing import Dict, Any, List, Tuple
 
+# OpenAQ concentration gates. These only apply when the openaq_concentrations
+# signal status is "present" (fresh, complete, US reference-monitor data);
+# otherwise scoring behaves exactly as before.
+OPENAQ_DUST_RATIO_MAX = 0.35       # PM2.5/PM10 ratio below this -> coarse-dominated (dust)
+OPENAQ_SMOKE_RATIO_MIN = 0.70      # PM2.5/PM10 ratio at/above this -> fine-dominated (smoke/combustion)
+OPENAQ_NO2_PPB = 50.0              # traffic/combustion tracer
+OPENAQ_SO2_PPB = 75.0              # industrial point-source tracer
+OPENAQ_CO_PPM = 2.0                # combustion tracer
+OPENAQ_SAME_HOUR_PERCENTILE = 90.0
+OPENAQ_SAME_HOUR_FACTOR = 2.0
+
+
 def score_hypotheses(
     observation: Dict[str, Any],
     signals: List[Dict[str, Any]]
@@ -49,6 +61,32 @@ def score_hypotheses(
     is_calm = wind_speed is not None and wind_speed < 4.0
     is_high_wind = wind_speed is not None and wind_speed >= 15.0
     is_cold = temp_f is not None and temp_f < 55.0
+
+    # OpenAQ reference-monitor concentrations (gated on status == "present").
+    openaq = sig_map.get("openaq_concentrations", {})
+    op_present = openaq.get("status") == "present"
+    pm25_conc = openaq.get("pm25")
+    no2_ppb = openaq.get("no2_ppb")
+    so2_ppb = openaq.get("so2_ppb")
+    co_ppm = openaq.get("co_ppm")
+    pm_ratio = openaq.get("pm25_pm10_ratio")
+    same_hour_pct = openaq.get("same_hour_percentile")
+    same_hour_median = openaq.get("same_hour_median")
+    daily_pct = openaq.get("daily_percentile")
+
+    fine_dominated = op_present and pm_ratio is not None and pm_ratio >= OPENAQ_SMOKE_RATIO_MIN
+    coarse_dominated = op_present and pm_ratio is not None and pm_ratio < OPENAQ_DUST_RATIO_MAX
+    urban_tracer = op_present and pm_elevated and (
+        (no2_ppb is not None and no2_ppb >= OPENAQ_NO2_PPB)
+        or (so2_ppb is not None and so2_ppb >= OPENAQ_SO2_PPB)
+        or (co_ppm is not None and co_ppm >= OPENAQ_CO_PPM)
+    )
+    same_hour_anomaly = (
+        op_present and pm_elevated and pm25_conc is not None
+        and same_hour_pct is not None and same_hour_pct >= OPENAQ_SAME_HOUR_PERCENTILE
+        and same_hour_median is not None and same_hour_median > 0
+        and pm25_conc >= OPENAQ_SAME_HOUR_FACTOR * same_hour_median
+    )
 
     # News may decorate FIRMS/AOD evidence, but only FIRMS makes a news name a fire vote
     # (AOD-only + news was enough to falsely crown "Man Starts Fire" as high-confidence smoke).
@@ -104,6 +142,12 @@ def score_hypotheses(
         # light_haze_extreme_pm already mentions AQI in its fire signal
         smoke_support.append(f"Surface PM2.5/PM10 is elevated as primary pollutant (AQI {aqi_val})")
 
+    if fine_dominated and pm_elevated and (aod_present or has_firms_corroboration):
+        smoke_support.append("PM is fine-particle dominated — consistent with smoke rather than coarse dust")
+
+    if coarse_dominated and pm_elevated:
+        smoke_against.append("PM is coarse-particle dominated — favors dust over smoke")
+
     # Contradiction: Heavy column plume present but surface PM not elevated (Aloft smoke)
     if aod_value >= 0.4 and not pm_elevated:
         smoke_against.append(f"High atmospheric particle density overhead (AOD {aod_value:.2f}), but surface monitors show low ground PM levels")
@@ -153,6 +197,19 @@ def score_hypotheses(
     else:
         smoke_conf = "low"
         smoke_score = 25
+
+    if fine_dominated and pm_elevated and (aod_present or has_firms_corroboration):
+        smoke_score = max(smoke_score, 60)
+        if smoke_conf == "low":
+            smoke_conf = "medium"
+    if (
+        op_present and pm_elevated and co_ppm is not None
+        and co_ppm >= OPENAQ_CO_PPM and (aod_present or has_firms_corroboration)
+    ):
+        smoke_support.append("Elevated carbon monoxide alongside PM — a combustion signature consistent with smoke")
+        smoke_score = max(smoke_score, 55)
+        if smoke_conf == "low":
+            smoke_conf = "medium"
 
     place_desc = None
     if nearest_firm:
@@ -236,6 +293,9 @@ def score_hypotheses(
     elif wind_speed is not None:
         dust_against.append(f"Wind speed ({wind_speed} mph) is below the threshold typically needed to loft significant dust")
 
+    if coarse_dominated and pm_elevated:
+        dust_support.append("PM2.5 is only a small fraction of PM10 — coarse particles consistent with windblown dust")
+
     if pm10_primary and is_high_wind:
         dust_conf, dust_score = "high", 85
     elif pm10_primary and wind_speed is not None and wind_speed >= 8.0:
@@ -244,6 +304,11 @@ def score_hypotheses(
         dust_conf, dust_score = "low", 30
     else:
         dust_conf, dust_score = "low", 10
+
+    if coarse_dominated and pm_elevated:
+        dust_score = max(dust_score, 55)
+        if dust_conf == "low":
+            dust_conf = "medium"
 
     hypotheses.append({
         "id": "windblown_dust",
@@ -277,6 +342,16 @@ def score_hypotheses(
     if boundary_layer_height_m is not None and boundary_layer_height_m < 500:
         stagnation_support.append(f"Shallow boundary layer height ({boundary_layer_height_m:.0f}m) indicates trapped near-surface air")
 
+    if same_hour_anomaly:
+        if is_cold and is_calm:
+            stagnation_support.append(
+                "PM2.5 is well above the usual reading for this time of day — consistent with air being trapped near the surface"
+            )
+        else:
+            open_questions.append(
+                "PM2.5 is unusually high for this time of day, but current conditions don't point to a trapping inversion"
+            )
+
     if pm_elevated and is_cold and is_calm and fire_signal_count == 0:
         stagnation_conf = "high" if (boundary_layer_height_m is not None and boundary_layer_height_m < 500) else "medium"
         stagnation_score = 85 if stagnation_conf == "high" else 65
@@ -284,6 +359,11 @@ def score_hypotheses(
         stagnation_conf, stagnation_score = "low", 30
     else:
         stagnation_conf, stagnation_score = "low", 15
+
+    if same_hour_anomaly and is_cold and is_calm:
+        stagnation_score = max(stagnation_score, 70)
+        if stagnation_conf == "low":
+            stagnation_conf = "medium"
 
     hypotheses.append({
         "id": "winter_stagnation",
@@ -317,6 +397,20 @@ def score_hypotheses(
     elif pm_elevated:
         urban_support.append("PM is elevated, but a more specific mode (fire, dust, or stagnation) better explains it")
 
+    if urban_tracer:
+        parts = []
+        if no2_ppb is not None and no2_ppb >= OPENAQ_NO2_PPB:
+            parts.append("traffic-related nitrogen dioxide")
+        if so2_ppb is not None and so2_ppb >= OPENAQ_SO2_PPB:
+            parts.append("industrial sulfur dioxide")
+        if co_ppm is not None and co_ppm >= OPENAQ_CO_PPM:
+            parts.append("combustion-related carbon monoxide")
+        urban_support.append(
+            "Monitor data shows elevated " + " and ".join(parts) + " — a signature of local combustion and traffic"
+        )
+    if fine_dominated and pm_elevated and not (aod_present or has_firms_corroboration):
+        urban_support.append("PM is fine-particle dominated — consistent with local combustion or traffic rather than coarse dust")
+
     if not pm_elevated:
         urban_against.append("Surface PM is within satisfactory/normal range")
     if has_firms_corroboration:
@@ -347,6 +441,15 @@ def score_hypotheses(
     else:
         urban_conf, urban_score = "low", 15
 
+    if urban_tracer:
+        urban_score = max(urban_score, 55)
+        if urban_conf == "low":
+            urban_conf = "medium"
+    if fine_dominated and pm_elevated and not (aod_present or has_firms_corroboration):
+        urban_score = max(urban_score, 55)
+        if urban_conf == "low":
+            urban_conf = "medium"
+
     hypotheses.append({
         "id": "urban_industrial_pm",
         "title": "Localized Urban / Industrial PM",
@@ -361,5 +464,9 @@ def score_hypotheses(
 
     if aqi_val <= 50:
         open_questions.append("Air quality index is currently in the 'Good' range (AQI ≤ 50).")
+    if op_present and pm_elevated and daily_pct is not None and daily_pct >= 90:
+        open_questions.append(
+            "PM2.5 today is well above this location's typical daily readings — an unusual day for this area"
+        )
 
     return hypotheses, open_questions
