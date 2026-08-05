@@ -23,6 +23,7 @@ from unittest.mock import patch
 
 from backend.db import DB_PATH
 from backend.eval_corpus import CORPUS
+from backend.eval_report import render_dashboard
 from backend.engine.score import score_hypotheses
 from backend.llm import generate_narrative_briefing
 from backend.llm_judge import judge_narrative
@@ -226,8 +227,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--db", default=DB_PATH, help="SQLite cache path (default: backend/cache.db)")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    subparsers.add_parser("stats", help="aggregate judge verdicts")
-    subparsers.add_parser("rule-judge", help="deterministic checks over cached narratives")
+    stats = subparsers.add_parser("stats", help="aggregate judge verdicts")
+    stats.add_argument("--out", help="optional JSON output path")
+
+    rule = subparsers.add_parser("rule-judge", help="deterministic checks over cached narratives")
+    rule.add_argument("--out", help="optional JSON output path")
 
     export = subparsers.add_parser("export-fails", help="dump judge-failed narratives")
     export.add_argument("--out", required=True, help="output file path")
@@ -240,12 +244,32 @@ def main(argv: Optional[List[str]] = None) -> int:
     compare.add_argument("--model", required=True, help="candidate judge model (e.g. JUDGE_MODEL value)")
     compare.add_argument("--out", help="optional JSON output path")
 
+    dashboard = subparsers.add_parser(
+        "render-dashboard",
+        help="build the static eval dashboard HTML (publishes to VM via nightly workflow)",
+    )
+    dashboard.add_argument("--corpus", help="JSON file from `corpus --out`")
+    dashboard.add_argument("--compare", help="JSON file from `judge-compare --out`")
+    dashboard.add_argument("--stats", help="JSON file from `stats --out`")
+    dashboard.add_argument("--rule-hits", help="JSON file from `rule-judge --out`")
+    dashboard.add_argument("--out", required=True, help="output HTML path")
+
     args = parser.parse_args(argv)
 
     if args.command == "stats":
-        print(json.dumps(compute_stats(args.db), indent=2, default=str))
+        result = compute_stats(args.db)
+        if args.out:
+            with open(args.out, "w") as f:
+                json.dump(result, f, indent=2, default=str)
+            print(f"wrote stats to {args.out}")
+        else:
+            print(json.dumps(result, indent=2, default=str))
     elif args.command == "rule-judge":
         hits = compute_rule_judge(args.db)
+        if args.out:
+            with open(args.out, "w") as f:
+                json.dump(hits, f, indent=2, default=str)
+            print(f"wrote {len(hits)} rule violations to {args.out}")
         for hit in hits:
             print(hit)
         print(f"\n{len(hits)} narratives with rule violations")
@@ -264,6 +288,22 @@ def main(argv: Optional[List[str]] = None) -> int:
         if args.out:
             with open(args.out, "w") as f:
                 json.dump(results, f, indent=2)
+    elif args.command == "render-dashboard":
+        def _load(path):
+            if not path:
+                return None
+            with open(path) as f:
+                return json.load(f)
+
+        page = render_dashboard(
+            corpus=_load(args.corpus),
+            compare=_load(args.compare),
+            stats=_load(args.stats),
+            rule_hits=_load(args.rule_hits),
+        )
+        with open(args.out, "w") as f:
+            f.write(page)
+        print(f"rendered dashboard ({len(page)} bytes) to {args.out}")
     return 0
 
 

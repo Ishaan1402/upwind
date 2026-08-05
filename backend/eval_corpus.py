@@ -81,4 +81,25 @@ CORPUS: List[Dict[str, Any]] = [
             {"id": "ozone_heat", "status": "absent", "primary": False, "hot_day": False, "temperature_f": 72.0},
         ],
     },
+    {
+        "name": "openaq_conflict",
+        "location": {"lat": 40.7128, "lon": -74.0060, "name": "New York", "zip_code": "10001", "state": "NY", "city": "New York"},
+        "observation": {"aqi": 150, "primary_pollutant": "PM2.5", "category": "Unhealthy"},
+        "signals": [
+            {"id": "aerosol_plume", "status": "present", "aod_value": 0.65, "density": "medium"},
+            {"id": "firms_upwind", "status": "absent", "count": 0},
+            {"id": "wind", "status": "present", "speed_mph": 8.0, "direction_deg": 0.0},
+            {"id": "surface_pm_level", "status": "present", "primary": True, "pm10_primary": False, "pm25_primary": True, "elevated": True},
+            {"id": "ozone_heat", "status": "absent", "primary": False, "hot_day": False, "temperature_f": 70.0},
+            {
+                "id": "openaq_concentrations",
+                "label": "Local Monitor Concentrations (OpenAQ)",
+                "status": "present",
+                "pm25": 12.0,
+                "pm10": 15.0,
+                "pm25_pm10_ratio": 0.8,
+                "monitor": {"name": "Downtown", "distance_km": 8.0, "provider": "AirNow"},
+            },
+        ],
+    },
 ]

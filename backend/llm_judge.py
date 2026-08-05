@@ -15,6 +15,10 @@ Check the narrative against these rules:
 2. No leaked jargon: the narrative must not contain raw technical terms like "AOD", "FIRMS", "HMS", "OpenAQ", "hypothesis score", numeric confidence percentages, or raw units like "µg/m³", "ppb", "ppm".
 3. No headers/titles: no "**Briefing:**", no markdown headers, no dates.
 4. Structure: should read as 2 short paragraphs plus a brief actionable health tip at the end.
+5. AQI/monitor conflicts: if the evidence includes an open question about a mismatch
+   between the reported AQI and a monitor reading, the narrative must acknowledge it in
+   one plain sentence (the AQI is a longer-term average; the monitor reading is current)
+   and must not claim the AQI reading is wrong.
 
 Respond ONLY with a JSON object with exactly these fields:
 {
