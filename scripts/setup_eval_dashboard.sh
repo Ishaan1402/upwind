@@ -35,12 +35,15 @@ else
   HASH="$(openssl passwd -apr1 "$PASSWORD")"
   printf '%s:%s\n' "$EVAL_USER" "$HASH" > "$HTPASSWD"
   printf '%s:%s\n' "$EVAL_USER" "$PASSWORD" > "$AUTH_FILE"
-  chmod 600 "$HTPASSWD" "$AUTH_FILE"
   echo "    generated credentials (also stored in $AUTH_FILE):"
   echo "      URL:      https://getupwind.me/eval/"
   echo "      user:     $EVAL_USER"
   echo "      password: $PASSWORD"
 fi
+# nginx (www-data) must be able to read the htpasswd; only the plaintext
+# password file stays private to the deploy user.
+chmod 644 "$HTPASSWD"
+chmod 600 "$AUTH_FILE"
 
 if [ ! -f "$EVAL_DIR/index.html" ]; then
   printf '<!doctype html><title>Upwind eval</title><p>Dashboard not rendered yet; the first nightly run will populate this page.</p>\n' > "$EVAL_DIR/index.html"
