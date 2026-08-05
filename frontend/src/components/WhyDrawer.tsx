@@ -381,12 +381,6 @@ export const WhyDrawer: React.FC<WhyDrawerProps> = ({
             </div>
           )}
 
-          {/* Data attribution footnote (only when OpenAQ monitor data is live) */}
-          {signals.some(s => s.id === 'openaq_concentrations' && s.status === 'present') && (
-            <div className="data-attribution-note">
-              Data: EPA AirNow; monitor concentrations via OpenAQ
-            </div>
-          )}
         </div>
       </div>
     </div>
