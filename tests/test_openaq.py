@@ -12,6 +12,7 @@ from backend.services.openaq import (
     fetch_daily_baseline,
     fetch_latest,
     fetch_same_hour_baseline,
+    monitor_source_label,
     normalize_reading,
 )
 
@@ -99,7 +100,47 @@ def test_discover_reference_monitor_picks_nearest_and_filters():
     assert params["monitor"] == "true"
     assert params["mobile"] == "false"
     assert params["iso"] == "US"
-    assert params["radius"] == "25000"
+    assert params["radius"] == "10000"
+
+
+def test_discover_widens_radius_when_nothing_nearby():
+    client = Mock()
+
+    async def fake_get(url, params=None, **kwargs):
+        if params.get("radius") == "10000":
+            return make_response(200, {"results": []})
+        return make_response(200, {
+            "results": [
+                {
+                    "id": 999,
+                    "name": "Far Monitor",
+                    "coordinates": {"latitude": 34.2, "longitude": -118.0},
+                    "timezone": "America/Los_Angeles",
+                    "provider": {"name": "AirNow"},
+                }
+            ]
+        })
+
+    client.get = AsyncMock(side_effect=fake_get)
+    client.__aenter__ = AsyncMock(return_value=client)
+    client.__aexit__ = AsyncMock(return_value=False)
+
+    with patch("backend.services.openaq.httpx.AsyncClient", return_value=client), \
+         patch("backend.services.openaq.OPENAQ_API_KEY", "test-key"):
+        monitors = asyncio.run(discover_reference_monitors(34.0, -118.0))
+
+    assert monitors[0]["location_id"] == 999
+    radii = [c.kwargs["params"]["radius"] for c in client.get.await_args_list]
+    assert radii == ["10000", "25000"]
+
+
+def test_monitor_source_label():
+    assert monitor_source_label({"provider": "Texas"}) == "Texas monitor"
+    assert monitor_source_label({"provider": "AirNow"}) == "AirNow monitor"
+    assert monitor_source_label({"owner": "State Agency"}) == "State Agency monitor"
+    assert monitor_source_label({"provider": "Texas", "owner": "Unknown Governmental Organization"}) == "Texas monitor"
+    assert monitor_source_label({}) == "air quality monitor"
+    assert monitor_source_label({"provider": "", "owner": "Unknown Governmental Organization"}) == "air quality monitor"
 
 
 def test_discover_reference_monitors_returns_sorted_candidates():
@@ -151,6 +192,14 @@ def test_discover_reference_monitor_degrades():
     with patch("backend.services.openaq.httpx.AsyncClient", return_value=client), \
          patch("backend.services.openaq.OPENAQ_API_KEY", "test-key"):
         assert asyncio.run(discover_reference_monitor(34.0, -118.0)) is None
+
+
+def test_discover_reference_monitors_returns_empty_list_on_failure():
+    client = make_client({"v3/locations": make_response(500)})
+    with patch("backend.services.openaq.httpx.AsyncClient", return_value=client), \
+         patch("backend.services.openaq.OPENAQ_API_KEY", "test-key"):
+        monitors = asyncio.run(discover_reference_monitors(34.0, -118.0))
+    assert monitors == []
 
 
 def test_fetch_latest_maps_normalizes_and_filters_stale():

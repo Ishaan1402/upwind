@@ -156,7 +156,9 @@ def test_openaq_coarse_ratio_boosts_dust():
     observation = {"aqi": 140, "primary_pollutant": "PM10", "category": "Unhealthy for Sensitive Groups"}
     signals = _with_openaq(
         DUST_SIGNALS,
-        _openaq_signal(pm25=8.0, pm10=40.0, pm25_pm10_ratio=0.2),
+        # PM10 AQI 140 implies a 24h average of 155-254 µg/m³, so the measured
+        # reading must be inside that band or the disagreement gate suppresses it.
+        _openaq_signal(pm25=34.0, pm10=170.0, pm25_pm10_ratio=0.2),
     )
     hypotheses, _ = score_hypotheses(observation, signals)
     dust_h = next(h for h in hypotheses if h["id"] == "windblown_dust")
@@ -174,12 +176,12 @@ def test_openaq_fine_ratio_boosts_smoke_with_plume_evidence():
         {"id": "wind", "status": "present", "speed_mph": 8.0, "direction_deg": 0.0},
         {"id": "surface_pm_level", "status": "present", "primary": True, "pm10_primary": False, "pm25_primary": True, "elevated": True},
         {"id": "ozone_heat", "status": "absent", "primary": False, "hot_day": False, "temperature_f": 70.0},
-        _openaq_signal(pm25=17.0, pm10=20.0, pm25_pm10_ratio=0.85),
+        _openaq_signal(pm25=30.0, pm10=35.0, pm25_pm10_ratio=0.86),
     ]
     hypotheses, _ = score_hypotheses(observation, signals)
     smoke_h = next(h for h in hypotheses if h["id"] == "wildfire_smoke")
     assert any("fine-particle dominated" in s for s in smoke_h["support"])
-    assert any("PM2.5 measured at 17" in s for s in smoke_h["support"])
+    assert any("PM2.5 measured at 30 micrograms per cubic meter" in s for s in smoke_h["support"])
     assert smoke_h["score"] >= 60
 
 
@@ -192,7 +194,7 @@ def test_openaq_fine_ratio_clean_column_favors_urban():
     hypotheses, _ = score_hypotheses(observation, signals)
     urban_h = next(h for h in hypotheses if h["id"] == "urban_industrial_pm")
     assert any("fine-particle dominated" in s for s in urban_h["support"])
-    assert any("PM2.5 measured at 22" in s for s in urban_h["support"])
+    assert any("PM2.5 measured at 22 micrograms per cubic meter" in s for s in urban_h["support"])
     assert urban_h["score"] >= 55
     assert hypotheses[0]["id"] == "urban_industrial_pm"
 
@@ -220,6 +222,140 @@ def test_openaq_same_hour_anomaly_supports_stagnation():
     assert any("usual reading for this time of day" in s for s in stag_h["support"])
     assert stag_h["score"] >= 70
     assert hypotheses[0]["id"] == "winter_stagnation"
+
+
+def test_openaq_measured_conflict_suppresses_boosts_and_discloses():
+    """AQI 150 falls in the 101-150 PM2.5 band (the code's lower bound is
+    35.5 µg/m³); a 12 µg/m³ monitor reading is well under half of that, so
+    monitor evidence must not boost hypotheses and must be disclosed as an
+    open question instead."""
+    observation = {"aqi": 150, "primary_pollutant": "PM2.5", "category": "Unhealthy"}
+    signals = [
+        {"id": "aerosol_plume", "status": "present", "aod_value": 0.65, "density": "medium"},
+        {"id": "firms_upwind", "status": "absent", "count": 0},
+        {"id": "wind", "status": "present", "speed_mph": 8.0, "direction_deg": 0.0},
+        {"id": "surface_pm_level", "status": "present", "primary": True, "pm10_primary": False, "pm25_primary": True, "elevated": True},
+        {"id": "ozone_heat", "status": "absent", "primary": False, "hot_day": False, "temperature_f": 70.0},
+        _openaq_signal(
+            pm25=12.0,
+            pm10=15.0,
+            pm25_pm10_ratio=0.8,
+            monitor={"name": "Downtown", "distance_km": 8.0, "provider": "AirNow"},
+        ),
+    ]
+    hypotheses, open_questions = score_hypotheses(observation, signals)
+
+    for h in hypotheses:
+        assert not any("PM2.5 measured at" in s for s in h["support"])
+    smoke_h = next(h for h in hypotheses if h["id"] == "wildfire_smoke")
+    assert smoke_h["score"] < 60
+    assert any(
+        "The reported AQI is Unhealthy (150), but the nearest air quality monitor "
+        "measures 12 micrograms per cubic meter right now (8 km away)" in q
+        for q in open_questions
+    )
+
+
+def test_openaq_conflict_disclosure_only_for_nearby_monitors():
+    """A far-away monitor reading low is spatial variation: suppress the boost
+    but do not surface a confusing disclosure."""
+    observation = {"aqi": 150, "primary_pollutant": "PM2.5", "category": "Unhealthy"}
+    signals = [
+        {"id": "aerosol_plume", "status": "present", "aod_value": 0.65, "density": "medium"},
+        {"id": "firms_upwind", "status": "absent", "count": 0},
+        {"id": "wind", "status": "present", "speed_mph": 8.0, "direction_deg": 0.0},
+        {"id": "surface_pm_level", "status": "present", "primary": True, "pm10_primary": False, "pm25_primary": True, "elevated": True},
+        {"id": "ozone_heat", "status": "absent", "primary": False, "hot_day": False, "temperature_f": 70.0},
+        _openaq_signal(
+            pm25=12.0,
+            pm10=15.0,
+            pm25_pm10_ratio=0.8,
+            monitor={"name": "Far Site", "distance_km": 20.0, "provider": "AirNow"},
+        ),
+    ]
+    hypotheses, open_questions = score_hypotheses(observation, signals)
+
+    smoke_h = next(h for h in hypotheses if h["id"] == "wildfire_smoke")
+    assert smoke_h["score"] < 60
+    assert not any("The reported AQI is Unhealthy (150)" in q for q in open_questions)
+
+
+def test_openaq_conflict_uses_current_epa_pm25_breakpoints():
+    """Current EPA tables: AQI 51-100 implies >= 9.1 µg/m³ (half-floor 4.55)
+    and AQI 201-300 implies >= 125.5 (half-floor 62.75). Readings above those
+    leniency thresholds are not conflicts; the stale pre-2024 table (12.1 /
+    150.5 floors) would wrongly flag them."""
+    base = [
+        {"id": "aerosol_plume", "status": "present", "aod_value": 0.65, "density": "medium"},
+        {"id": "firms_upwind", "status": "absent", "count": 0},
+        {"id": "wind", "status": "present", "speed_mph": 8.0, "direction_deg": 0.0},
+        {"id": "surface_pm_level", "status": "present", "primary": True, "pm10_primary": False, "pm25_primary": True, "elevated": True},
+        {"id": "ozone_heat", "status": "absent", "primary": False, "hot_day": False, "temperature_f": 70.0},
+    ]
+
+    moderate_hypotheses, moderate_questions = score_hypotheses(
+        {"aqi": 55, "primary_pollutant": "PM2.5", "category": "Moderate"},
+        base
+        + [_openaq_signal(
+            pm25=5.0,
+            pm10=6.5,
+            pm25_pm10_ratio=0.77,
+            monitor={"name": "Downtown", "distance_km": 8.0, "provider": "AirNow"},
+        )],
+    )
+    assert not any("The reported AQI is" in q for q in moderate_questions)
+    assert any(
+        "nearest reporting monitor" in s
+        for h in moderate_hypotheses for s in h["support"]
+    )
+    assert any(
+        "at the AirNow monitor" in s
+        for h in moderate_hypotheses for s in h["support"]
+    )
+
+    _, very_unhealthy_questions = score_hypotheses(
+        {"aqi": 220, "primary_pollutant": "PM2.5", "category": "Very Unhealthy"},
+        base
+        + [_openaq_signal(
+            pm25=70.0,
+            pm10=90.0,
+            pm25_pm10_ratio=0.78,
+            monitor={"name": "Downtown", "distance_km": 8.0, "provider": "AirNow"},
+        )],
+    )
+    assert not any("The reported AQI is" in q for q in very_unhealthy_questions)
+
+
+def test_openaq_measured_ozone_supports_ozone_hypothesis():
+    observation = {"aqi": 120, "primary_pollutant": "O3", "category": "Unhealthy for Sensitive Groups"}
+    signals = [
+        {"id": "aerosol_plume", "status": "absent", "aod_value": 0.1},
+        {"id": "firms_upwind", "status": "absent", "count": 0},
+        {"id": "wind", "status": "present", "speed_mph": 4.0, "direction_deg": 90.0},
+        {"id": "surface_pm_level", "status": "absent", "primary": False, "pm10_primary": False, "pm25_primary": False, "elevated": False},
+        {"id": "ozone_heat", "status": "present", "primary": True, "hot_day": False, "temperature_f": 80.0},
+        _openaq_signal(o3_ppb=80.0, monitor={"name": "Downtown", "distance_km": 3.0, "provider": "AirNow"}),
+    ]
+    hypotheses, _ = score_hypotheses(observation, signals)
+    o3_h = next(h for h in hypotheses if h["id"] == "ozone_episode")
+    assert any("elevated ground-level ozone (80 parts per billion)" in s for s in o3_h["support"])
+    assert o3_h["score"] >= 70
+
+
+def test_openaq_measured_ozone_below_standard_does_not_boost():
+    observation = {"aqi": 120, "primary_pollutant": "O3", "category": "Unhealthy for Sensitive Groups"}
+    signals = [
+        {"id": "aerosol_plume", "status": "absent", "aod_value": 0.1},
+        {"id": "firms_upwind", "status": "absent", "count": 0},
+        {"id": "wind", "status": "present", "speed_mph": 4.0, "direction_deg": 90.0},
+        {"id": "surface_pm_level", "status": "absent", "primary": False, "pm10_primary": False, "pm25_primary": False, "elevated": False},
+        {"id": "ozone_heat", "status": "present", "primary": True, "hot_day": False, "temperature_f": 80.0},
+        _openaq_signal(o3_ppb=40.0),
+    ]
+    hypotheses, _ = score_hypotheses(observation, signals)
+    o3_h = next(h for h in hypotheses if h["id"] == "ozone_episode")
+    assert not any("Monitor data shows elevated ground-level ozone" in s for s in o3_h["support"])
+    assert o3_h["score"] == 60
 
 
 def test_openaq_same_hour_anomaly_without_calm_cold_is_open_question():

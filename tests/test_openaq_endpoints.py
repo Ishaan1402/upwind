@@ -1,6 +1,7 @@
 """Endpoint tests verifying OpenAQ signal wiring in both /api/why paths."""
 
 import json
+from contextlib import ExitStack
 from unittest.mock import AsyncMock, patch
 
 from fastapi.testclient import TestClient
@@ -111,3 +112,66 @@ def test_stream_emits_openaq_events_and_signal():
     signals_ready = events.get("signals_ready", [])
     assert signals_ready
     assert any(s["id"] == "openaq_concentrations" for s in signals_ready[0]["signals"])
+
+
+def test_stream_and_post_share_identical_signals():
+    """Both /api/why paths must produce the same evidence, including the
+    formerly-divergent unverified-news incident fields."""
+    from backend.main import app
+
+    async def fake_stream(*args, **kwargs):
+        yield "test narrative"
+
+    engine_patches = [
+        patch("backend.engine.signals.fetch_openmeteo_weather", new_callable=AsyncMock, return_value=WEATHER),
+        patch("backend.engine.signals.fetch_aod_signal", new_callable=AsyncMock, return_value=AOD_RESULT),
+        patch("backend.engine.signals.fetch_firms_hotspots", new_callable=AsyncMock, return_value=FIRMS_RESULT),
+        patch("backend.engine.signals.search_fire_incident_name", new_callable=AsyncMock, return_value="Test Fire"),
+        patch("backend.engine.signals.collect_openaq_signal", new_callable=AsyncMock, return_value=PRESENT_SIGNAL),
+    ]
+    router_patches = [
+        patch("backend.routers.why.fetch_openmeteo_weather", new_callable=AsyncMock, return_value=WEATHER),
+        patch("backend.routers.why.fetch_aod_signal", new_callable=AsyncMock, return_value=AOD_RESULT),
+        patch("backend.routers.why.fetch_firms_hotspots", new_callable=AsyncMock, return_value=FIRMS_RESULT),
+        patch("backend.routers.why.search_fire_incident_name", new_callable=AsyncMock, return_value="Test Fire"),
+        patch("backend.routers.why.collect_openaq_signal", new_callable=AsyncMock, return_value=PRESENT_SIGNAL),
+        patch("backend.routers.why.generate_narrative_briefing", new_callable=AsyncMock, return_value="test"),
+        patch("backend.routers.why.generate_narrative_briefing_stream", side_effect=fake_stream),
+        patch("backend.routers.why.judge_narrative", new_callable=AsyncMock, return_value={"verdict": "pass"}),
+        patch("backend.routers.why.update_cached_verdict", return_value=None),
+        patch("backend.routers.why.get_cached_narrative", return_value=None),
+        patch("backend.routers.why.set_cached_narrative", return_value=None),
+    ]
+
+    with ExitStack() as stack:
+        for p in engine_patches + router_patches:
+            stack.enter_context(p)
+        with TestClient(app) as client:
+            post_resp = client.post(
+                "/api/why",
+                json={
+                    "location": SMOKE_LOCATION,
+                    "observation": {"aqi": 85, "primary_pollutant": "PM2.5", "category": "Moderate"},
+                },
+            )
+            with client.stream(
+                "GET",
+                "/api/why/stream?lat=45.3199&lon=-117.8147&zip_code=97824&city=Cove&state=OR&name=Cove"
+                "&aqi=85&primary_pollutant=PM2.5&category=Moderate",
+            ) as stream_resp:
+                events = {}
+                current_event = None
+                for line in stream_resp.iter_lines():
+                    if line.startswith("event:"):
+                        current_event = line.split(":", 1)[1].strip()
+                    elif line.startswith("data:") and current_event:
+                        events.setdefault(current_event, []).append(json.loads(line.split(":", 1)[1].strip()))
+
+    assert post_resp.status_code == 200
+    post_signals = post_resp.json()["signals"]
+    stream_signals = events["signals_ready"][0]["signals"]
+    assert post_signals == stream_signals
+
+    firms = next(s for s in stream_signals if s["id"] == "firms_upwind")
+    assert firms["incident_name"] == "Test Fire"
+    assert firms["unverified_news_incident"] == "Test Fire"

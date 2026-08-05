@@ -48,7 +48,7 @@ export async function fetchWhyExplanation(location: any, observation: any): Prom
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ location, observation })
-  }, 12000);
+  }, 25000);
 
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: 'Failed to generate explanation' }));

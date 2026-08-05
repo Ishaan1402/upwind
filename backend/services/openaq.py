@@ -1,9 +1,12 @@
 """
 OpenAQ API v3 integration for Upwind.
 
-Pulls raw pollutant concentrations from US EPA reference monitors only
-(monitor=true, mobile=false, iso=US). OpenAQ serves physical concentrations
-rather than AQI values, which supplements the attribution scoring quality.
+Pulls raw pollutant concentrations from US reference-grade monitors only
+(monitor=true, mobile=false, iso=US). These are often state/local monitors
+rather than EPA-owned sites, so user-facing copy uses the provider name when
+available and "air quality monitor" otherwise. OpenAQ serves physical
+concentrations rather than AQI values, which supplements the attribution
+scoring quality.
 
 """
 
@@ -21,7 +24,9 @@ from backend.config import OPENAQ_API_KEY
 OPENAQ_BASE_URL = "https://api.openaq.org"
 OPENAQ_TIMEOUT_S = 3.0
 
-# Search radius in meters (OpenAQ API maximum).
+# Search radius in meters: prefer monitors close enough to be representative,
+# widen to the OpenAQ API maximum only when nothing is found nearby.
+OPENAQ_PREFERRED_RADIUS_M = 10_000
 OPENAQ_RADIUS_M = 25_000
 
 # Cached data TTLs (seconds).
@@ -43,6 +48,9 @@ MIN_PERCENT_COMPLETE = 75.0
 CANONICAL_PM_UNIT = "µg/m³"
 CANONICAL_PPB_UNIT = "ppb"
 CANONICAL_CO_UNIT = "ppm"
+
+# OpenAQ owner strings that carry no useful source information.
+_GENERIC_SOURCE_NAMES = {"", "unknown governmental organization"}
 
 _CACHE_BUCKETS: Dict[str, Dict[Any, Tuple[float, Any]]] = {}
 
@@ -139,20 +147,25 @@ def _percent_complete(record: Dict[str, Any]) -> Optional[float]:
         return None
 
 
-async def discover_reference_monitors(lat: float, lon: float, limit: int = 3) -> List[Dict[str, Any]]:
+def monitor_source_label(monitor: Dict[str, Any]) -> str:
     """
-    Find the nearest US EPA reference monitors within 25 km of (lat, lon),
-    sorted by distance.
-
-    Returns a list of candidate monitor metadata (nearest first), or an empty
-    list when no monitor is nearby, the key is missing, or the request fails.
+    Short human label for a monitor's operator: provider name when available,
+    otherwise "air quality monitor". Skips generic owner strings.
     """
-    if not OPENAQ_API_KEY:
-        return []
+    provider = (monitor.get("provider") or "").strip()
+    if provider and provider.lower() not in _GENERIC_SOURCE_NAMES:
+        return f"{provider} monitor"
+    owner = (monitor.get("owner") or "").strip()
+    if owner and owner.lower() not in _GENERIC_SOURCE_NAMES:
+        return f"{owner} monitor"
+    return "air quality monitor"
 
+
+async def _fetch_location_results(lat: float, lon: float, radius_m: int) -> Optional[List[Dict[str, Any]]]:
+    """Raw reference-monitor location search; None on failure, [] on no matches."""
     params = {
         "coordinates": f"{lat},{lon}",
-        "radius": str(OPENAQ_RADIUS_M),
+        "radius": str(radius_m),
         "monitor": "true",
         "mobile": "false",
         "iso": "US",
@@ -166,8 +179,30 @@ async def discover_reference_monitors(lat: float, lon: float, limit: int = 3) ->
             data = resp.json()
     except Exception:
         return None
+    return data.get("results", []) if isinstance(data, dict) else []
 
-    results = data.get("results", []) if isinstance(data, dict) else []
+
+async def discover_reference_monitors(
+    lat: float, lon: float, limit: int = 3, radius_m: Optional[int] = None
+) -> List[Dict[str, Any]]:
+    """
+    Find the nearest US reference-grade monitors within radius_m (default: 10 km,
+    widening to the API max when nothing is found), sorted by distance.
+
+    Returns a list of candidate monitor metadata (nearest first), or an empty
+    list when no monitor is nearby, the key is missing, or the request fails.
+    """
+    if not OPENAQ_API_KEY:
+        return []
+
+    results = await _fetch_location_results(lat, lon, radius_m or OPENAQ_PREFERRED_RADIUS_M)
+    if results is None:
+        return []
+    if not results and radius_m is None:
+        results = await _fetch_location_results(lat, lon, OPENAQ_RADIUS_M)
+        if results is None:
+            return []
+
     candidates = []
     for loc in results:
         coords = loc.get("coordinates") or {}
@@ -191,7 +226,7 @@ async def discover_reference_monitors(lat: float, lon: float, limit: int = 3) ->
 
 
 async def discover_reference_monitor(lat: float, lon: float) -> Optional[Dict[str, Any]]:
-    """Find the single nearest US EPA reference monitor within 25 km."""
+    """Find the single nearest US reference-grade monitor (10 km preferred, 25 km max)."""
     monitors = await discover_reference_monitors(lat, lon, limit=1)
     return monitors[0] if monitors else None
 

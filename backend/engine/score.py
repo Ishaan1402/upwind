@@ -1,4 +1,5 @@
-from typing import Dict, Any, List, Tuple
+from typing import Dict, Any, List, Optional, Tuple
+from backend.services.openaq import monitor_source_label
 
 # OpenAQ concentration gates. These only apply when the openaq_concentrations
 # signal status is "present" (fresh, complete, US reference-monitor data);
@@ -8,8 +9,37 @@ OPENAQ_SMOKE_RATIO_MIN = 0.70      # PM2.5/PM10 ratio at/above this -> fine-domi
 OPENAQ_NO2_PPB = 50.0              # traffic/combustion tracer
 OPENAQ_SO2_PPB = 75.0              # industrial point-source tracer
 OPENAQ_CO_PPM = 2.0                # combustion tracer
+OPENAQ_O3_PPB = 70.0               # EPA 1-hour NAAQS for ground-level ozone
 OPENAQ_SAME_HOUR_PERCENTILE = 90.0
 OPENAQ_SAME_HOUR_FACTOR = 2.0
+
+# AirNow/OpenAQ disagreement gate. The reported AQI is a longer-term average
+# (NowCast) while OpenAQ is an hourly reading from a monitor up to 25 km away.
+# If the measured concentration is below half the lower bound of the AQI band
+# the reported AQI implies, the readings conflict too strongly to use the
+# monitor value as scoring evidence; it is disclosed as an open question
+# instead of boosting any hypothesis.
+OPENAQ_MEASURED_CONFLICT_FACTOR = 0.5
+# Current EPA 24-hour AQI breakpoints (AQS code table "aqi_breakpoints").
+# The PM2.5 Good band is now 0.0-9.0 µg/m³ after the tightened annual
+# standard; the upper bands tightened to 125.5/225.5/325.5. PM10 is
+# unchanged, with a single HAZARDOUS band at 301-500 (floor 425.0).
+# Values are the low concentration of each AQI band.
+PM25_AQI_LOWER_BOUNDS = (
+    (51, 9.1), (101, 35.5), (151, 55.5), (201, 125.5), (301, 225.5), (401, 325.5)
+)
+PM10_AQI_LOWER_BOUNDS = (
+    (51, 55.0), (101, 155.0), (151, 255.0), (201, 355.0), (301, 425.0)
+)
+
+
+def _aqi_concentration_lower_bound(aqi: int, bounds) -> Optional[float]:
+    """Lowest concentration (µg/m³) the reported AQI band implies."""
+    lower = None
+    for band_aqi, concentration in bounds:
+        if aqi >= band_aqi:
+            lower = concentration
+    return lower
 
 
 def score_hypotheses(
@@ -66,6 +96,7 @@ def score_hypotheses(
     openaq = sig_map.get("openaq_concentrations", {})
     op_present = openaq.get("status") == "present"
     pm25_conc = openaq.get("pm25")
+    o3_ppb = openaq.get("o3_ppb")
     no2_ppb = openaq.get("no2_ppb")
     so2_ppb = openaq.get("so2_ppb")
     co_ppm = openaq.get("co_ppm")
@@ -73,22 +104,54 @@ def score_hypotheses(
     same_hour_pct = openaq.get("same_hour_percentile")
     same_hour_median = openaq.get("same_hour_median")
     daily_pct = openaq.get("daily_percentile")
-    openaq_dist_km = (openaq.get("monitor") or {}).get("distance_km")
+    openaq_monitor = openaq.get("monitor") or {}
+    openaq_dist_km = openaq_monitor.get("distance_km")
+    openaq_label = monitor_source_label(openaq_monitor)
+
+    # Conflict gate: elevated reported AQI but a much lower measured reading.
+    measured_conflict = False
+    conflict_value = None
+    if op_present and pm_elevated:
+        if pm_primary and not pm10_primary:
+            bounds, conflict_value = PM25_AQI_LOWER_BOUNDS, pm25_conc
+        elif pm10_primary:
+            bounds, conflict_value = PM10_AQI_LOWER_BOUNDS, openaq.get("pm10")
+        else:
+            bounds, conflict_value = None, None
+        if bounds and conflict_value is not None:
+            lower = _aqi_concentration_lower_bound(aqi_val, bounds)
+            if lower is not None and conflict_value < lower * OPENAQ_MEASURED_CONFLICT_FACTOR:
+                measured_conflict = True
+
     measured_line = None
     if pm25_conc is not None:
-        measured_line = f"PM2.5 measured at {pm25_conc:.0f} µg/m³ at an EPA monitor"
+        measured_line = (
+            f"PM2.5 measured at {pm25_conc:.0f} micrograms per cubic meter "
+            f"at the {openaq_label}"
+        )
         if openaq_dist_km is not None:
             measured_line += f" {openaq_dist_km:.0f} km from here"
 
-    fine_dominated = op_present and pm_ratio is not None and pm_ratio >= OPENAQ_SMOKE_RATIO_MIN
-    coarse_dominated = op_present and pm_ratio is not None and pm_ratio < OPENAQ_DUST_RATIO_MAX
-    urban_tracer = op_present and pm_elevated and (
+    monitor_distance_suffix = (
+        f" at the nearest reporting monitor {openaq_dist_km:.0f} km away"
+        if openaq_dist_km is not None else " at the nearest reporting monitor"
+    )
+
+    fine_dominated = (
+        op_present and not measured_conflict and pm_ratio is not None
+        and pm_ratio >= OPENAQ_SMOKE_RATIO_MIN
+    )
+    coarse_dominated = (
+        op_present and not measured_conflict and pm_ratio is not None
+        and pm_ratio < OPENAQ_DUST_RATIO_MAX
+    )
+    urban_tracer = op_present and not measured_conflict and pm_elevated and (
         (no2_ppb is not None and no2_ppb >= OPENAQ_NO2_PPB)
         or (so2_ppb is not None and so2_ppb >= OPENAQ_SO2_PPB)
         or (co_ppm is not None and co_ppm >= OPENAQ_CO_PPM)
     )
     same_hour_anomaly = (
-        op_present and pm_elevated and pm25_conc is not None
+        op_present and not measured_conflict and pm_elevated and pm25_conc is not None
         and same_hour_pct is not None and same_hour_pct >= OPENAQ_SAME_HOUR_PERCENTILE
         and same_hour_median is not None and same_hour_median > 0
         and pm25_conc >= OPENAQ_SAME_HOUR_FACTOR * same_hour_median
@@ -149,13 +212,20 @@ def score_hypotheses(
         smoke_support.append(f"Surface PM2.5/PM10 is elevated as primary pollutant (AQI {aqi_val})")
 
     if fine_dominated and pm_elevated and (aod_present or has_firms_corroboration):
-        smoke_support.append("PM is fine-particle dominated, consistent with smoke rather than coarse dust")
+        smoke_support.append(
+            f"PM is fine-particle dominated{monitor_distance_suffix}, consistent with smoke rather than coarse dust"
+        )
 
-    if op_present and pm_elevated and pm25_conc is not None and (aod_present or has_firms_corroboration):
+    if (
+        op_present and pm_elevated and pm25_conc is not None
+        and not measured_conflict and (aod_present or has_firms_corroboration)
+    ):
         smoke_support.append(measured_line)
 
     if coarse_dominated and pm_elevated:
-        smoke_against.append("PM is coarse-particle dominated, favoring dust over smoke")
+        smoke_against.append(
+            f"PM is coarse-particle dominated{monitor_distance_suffix}, favoring dust over smoke"
+        )
 
     # Contradiction: Heavy column plume present but surface PM not elevated (Aloft smoke)
     if aod_value >= 0.4 and not pm_elevated:
@@ -212,7 +282,7 @@ def score_hypotheses(
         if smoke_conf == "low":
             smoke_conf = "medium"
     if (
-        op_present and pm_elevated and co_ppm is not None
+        op_present and not measured_conflict and pm_elevated and co_ppm is not None
         and co_ppm >= OPENAQ_CO_PPM and (aod_present or has_firms_corroboration)
     ):
         smoke_support.append("Elevated carbon monoxide alongside PM, a combustion signature consistent with smoke")
@@ -277,6 +347,18 @@ def score_hypotheses(
         o3_conf = "low"
         o3_score = 15
 
+    # Measured monitor ozone corroborates the ozone hypothesis (EPA 1-hour
+    # standard, 70 ppb). No conflict gate here: a low current 1-hour reading
+    # does not contradict an 8-hour-based ozone AQI, so only the elevated
+    # direction is scored.
+    if op_present and o3_primary and o3_ppb is not None and o3_ppb >= OPENAQ_O3_PPB:
+        o3_support.append(
+            f"Monitor data shows elevated ground-level ozone ({o3_ppb:.0f} parts per billion) "
+            f"at the {openaq_label}"
+            + (f" {openaq_dist_km:.0f} km from here" if openaq_dist_km is not None else "")
+        )
+        o3_score = max(o3_score, 70)
+
     hypotheses.append({
         "id": "ozone_episode",
         "title": "Photochemical Ozone Episode",
@@ -303,7 +385,9 @@ def score_hypotheses(
         dust_against.append(f"Wind speed ({wind_speed} mph) is below the threshold typically needed to loft significant dust")
 
     if coarse_dominated and pm_elevated:
-        dust_support.append("PM2.5 is only a small fraction of PM10, coarse particles consistent with windblown dust")
+        dust_support.append(
+            f"PM2.5 is only a small fraction of PM10{monitor_distance_suffix}, consistent with windblown dust"
+        )
 
     if pm10_primary and is_high_wind:
         dust_conf, dust_score = "high", 85
@@ -418,9 +502,14 @@ def score_hypotheses(
             "Monitor data shows elevated " + " and ".join(parts) + ", a signature of local combustion and traffic"
         )
     if fine_dominated and pm_elevated and not (aod_present or has_firms_corroboration):
-        urban_support.append("PM is fine-particle dominated, consistent with local combustion or traffic rather than coarse dust")
+        urban_support.append(
+            f"PM is fine-particle dominated{monitor_distance_suffix}, consistent with local combustion or traffic rather than coarse dust"
+        )
 
-    if op_present and pm_elevated and pm25_conc is not None and not (aod_present or has_firms_corroboration):
+    if (
+        op_present and pm_elevated and pm25_conc is not None
+        and not measured_conflict and not (aod_present or has_firms_corroboration)
+    ):
         urban_support.append(measured_line)
 
     if not pm_elevated:
@@ -476,9 +565,22 @@ def score_hypotheses(
 
     if aqi_val <= 50:
         open_questions.append("Air quality index is currently in the 'Good' range (AQI ≤ 50).")
-    if op_present and pm_elevated and daily_pct is not None and daily_pct >= 90:
+    if op_present and not measured_conflict and pm_elevated and daily_pct is not None and daily_pct >= 90:
         open_questions.append(
-            "PM2.5 today is well above this location's typical daily readings, an unusual day for this area"
+            "PM2.5 is well above this location's typical daily readings, an unusual day for this area"
         )
-
+    # Only disclose the mismatch when the monitor is close enough to be
+    # meaningful (or distance is unknown); a distant low reading is spatial
+    # variation and explaining it just confuses users.
+    if (
+        measured_conflict and conflict_value is not None
+        and (openaq_dist_km is None or openaq_dist_km <= 10.0)
+    ):
+        category = observation.get("category", "elevated")
+        dist_part = f" ({openaq_dist_km:.0f} km away)" if openaq_dist_km is not None else ""
+        open_questions.append(
+            f"The reported AQI is {category} ({aqi_val}), but the nearest air quality monitor "
+            f"measures {conflict_value:.0f} micrograms per cubic meter right now{dist_part}; the AQI is "
+            "a longer-term average while the monitor reading is current, so the two can differ"
+        )
     return hypotheses, open_questions

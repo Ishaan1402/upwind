@@ -83,3 +83,20 @@ def test_unavailable_when_no_candidate_has_fresh_readings():
 
     assert signal["status"] == "unavailable"
     assert "No fresh readings" in signal["details"]
+
+
+def test_skips_baseline_calls_when_include_baselines_false():
+    pm25 = {"value": 10.0, "unit": "µg/m³", "as_of": "2026-08-04T19:00:00+00:00"}
+    with patch("backend.engine.signals.discover_reference_monitors", new_callable=AsyncMock, return_value=[_candidate(111)]), \
+         patch("backend.engine.signals.fetch_latest", new_callable=AsyncMock, return_value=_readings(pm25=pm25)), \
+         patch("backend.engine.signals.fetch_location_sensors", new_callable=AsyncMock, return_value={
+             101: {"name": "pm25", "units": "µg/m³"},
+         }), \
+         patch("backend.engine.signals.fetch_daily_baseline", new_callable=AsyncMock) as daily, \
+         patch("backend.engine.signals.fetch_same_hour_baseline", new_callable=AsyncMock) as same_hour:
+        signal = asyncio.run(collect_openaq_signal(34.0, -118.0, include_baselines=False))
+
+    assert signal["status"] == "present"
+    assert signal["pm25"] == 10.0
+    daily.assert_not_awaited()
+    same_hour.assert_not_awaited()
