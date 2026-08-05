@@ -11,11 +11,17 @@ from backend.services.openmeteo import fetch_openmeteo_weather, fetch_openmeteo_
 from backend.services.aod import fetch_aod_signal
 from backend.services.firms import fetch_firms_hotspots
 from backend.services.incident_search import search_fire_incident_name
-from backend.engine.signals import assemble_evidence_signals, TOOL_STEPS, create_trace_step
+from backend.engine.signals import (
+    assemble_evidence_signals,
+    build_evidence_signals,
+    TOOL_STEPS,
+    create_trace_step,
+    collect_openaq_signal,
+)
 from backend.engine.score import score_hypotheses
 from backend.llm import generate_narrative_briefing, generate_narrative_briefing_stream, generate_fallback_narrative
 from backend.llm_judge import judge_narrative
-from backend.db import get_cached_narrative, set_cached_narrative
+from backend.db import get_cached_narrative, set_cached_narrative, update_cached_verdict
 
 router = APIRouter(prefix="/api", tags=["Why Attribution"])
 
@@ -27,7 +33,19 @@ async def _async_judge_streamed_narrative(evidence_payload: Dict[str, Any], full
     """Post-hoc non-blocking evaluation of streamed narrative."""
     try:
         verdict = await judge_narrative(evidence_payload, full_narrative)
+        update_cached_verdict(cache_key, verdict)
         if verdict.get("verdict") == "fail":
+            # Cache-heal: replace the failed narrative with the deterministic
+            # fallback so every later viewer of this location/hour gets the
+            # corrected text instead of the rejected one.
+            fallback = generate_fallback_narrative(
+                evidence_payload["location"],
+                evidence_payload["observation"],
+                evidence_payload["signals"],
+                evidence_payload["hypotheses"],
+                evidence_payload["open_questions"],
+            )
+            set_cached_narrative(cache_key, fallback, evidence_payload, verdict)
             print(f"[LLM Judge Stream Warning]: Streamed narrative failed judge check ({verdict.get('reasoning')}). Hallucinations: {verdict.get('hallucinations')}, Jargon: {verdict.get('leaked_jargon')}")
     except Exception as e:
         print(f"[LLM Judge Stream Error]: {e}")
@@ -154,7 +172,9 @@ async def stream_why_explanation(
             "aqi": aqi,
             "primary_pollutant": primary_pollutant or "PM2.5",
             "category": category or "Moderate",
-            "pollutants": {"PM2.5": float(aqi)}
+            # The client only reports AQI here, not a measured concentration;
+            # do not fabricate a PM2.5 value (it would be mislabeled µg/m³).
+            "pollutants": {}
         }
 
     async def sse_event_generator():
@@ -170,7 +190,6 @@ async def stream_why_explanation(
         t1 = time.perf_counter()
         wind_speed = weather.get("wind_speed_mph") if weather else None
         wind_dir = weather.get("wind_direction_deg") if weather else None
-        temp_f = weather.get("temperature_f") if weather else None
 
         weather_trace = create_trace_step("weather_vector", (t1 - t0) * 1000, "done" if weather else "warning")
         execution_trace.append(weather_trace)
@@ -211,62 +230,23 @@ async def stream_why_explanation(
         execution_trace.append(web_trace)
         yield f"event: tool_done\ndata: {json.dumps(web_trace)}\n\n"
 
-        boundary_layer_height_m = weather.get("boundary_layer_height_m") if weather else None
-        is_pm10_primary = "PM10" in primary_pollutant
-        is_pm25_primary = is_pm_primary and not is_pm10_primary
+        # 5. OpenAQ Reference Monitor Concentrations Tool
+        yield f"event: tool_start\ndata: {json.dumps({'step': 'openaq_monitors', 'label': TOOL_STEPS['openaq_monitors']})}\n\n"
+        t0 = time.perf_counter()
+        openaq_sig = await collect_openaq_signal(lat, lon, include_baselines=aqi_val > 50)
+        t1 = time.perf_counter()
+        openaq_trace = create_trace_step(
+            "openaq_monitors",
+            (t1 - t0) * 1000,
+            "done" if openaq_sig.get("status") == "present" else "warning"
+        )
+        execution_trace.append(openaq_trace)
+        yield f"event: tool_done\ndata: {json.dumps(openaq_trace)}\n\n"
 
-        # Assemble final signals
-        signals = [
-            {
-                "id": "aerosol_plume",
-                "label": "Atmospheric Column Particle Density (AOD)",
-                "status": aod_res["status"],
-                "density": aod_res.get("density"),
-                "aod_value": aod_res.get("aod_value"),
-                "details": aod_res.get("details", "")
-            },
-            {
-                "id": "firms_upwind",
-                "label": "Upwind Thermal Hotspots (NASA FIRMS)",
-                "status": firms_res["status"],
-                "count": firms_res.get("count", 0),
-                "total_count": firms_res.get("total_count", 0),
-                "nearest": firms_res.get("nearest"),
-                "hotspots": firms_res.get("hotspots", []),
-                "alignment": firms_res.get("alignment"),
-                "incident_name": incident_name,
-                "details": firms_res.get("details", "")
-            },
-            {
-                "id": "wind",
-                "label": "Surface Wind Vector",
-                "status": "present" if weather else "unavailable",
-                "speed_mph": wind_speed,
-                "direction_deg": wind_dir,
-                "upwind_deg": round((wind_dir + 180) % 360, 1) if wind_dir is not None else None,
-                "boundary_layer_height_m": boundary_layer_height_m,
-                "details": f"{wind_speed} mph from {wind_dir}°" if weather else "Unavailable"
-            },
-            {
-                "id": "surface_pm_level",
-                "label": "Surface Particulate Matter (PM2.5 / PM10)",
-                "status": "present" if is_pm_primary else "absent",
-                "primary": is_pm_primary,
-                "pm10_primary": is_pm10_primary,
-                "pm25_primary": is_pm25_primary,
-                "elevated": is_pm_elevated,
-                "details": f"Primary pollutant: {primary_pollutant} (AQI {aqi_val})"
-            },
-            {
-                "id": "ozone_heat",
-                "label": "Ozone & Atmospheric Heat",
-                "status": "present" if ("O3" in primary_pollutant or (temp_f and temp_f >= 85)) else "absent",
-                "primary": "O3" in primary_pollutant,
-                "hot_day": bool(temp_f and temp_f >= 85),
-                "temperature_f": temp_f,
-                "details": f"Temperature: {temp_f}°F" if temp_f else "N/A"
-            }
-        ]
+        # Assemble final signals (shared shape with the non-stream /api/why path)
+        signals = build_evidence_signals(
+            observation, weather, aod_res, firms_res, incident_name, openaq_sig
+        )
 
         # 5. Score Hypotheses Tool
         yield f"event: tool_start\ndata: {json.dumps({'step': 'score_hypotheses', 'label': TOOL_STEPS['score_hypotheses']})}\n\n"

@@ -15,6 +15,7 @@ Rules:
 8. Fire Name Corroboration: Only state that a named wildfire is affecting ground air if support lists nearby thermal hotspots (not news or haze alone). Overhead haze without nearby fires should be framed as regional/urban particles, not a confirmed distant wildfire.
 9. No Invented Transport: Do NOT invent transport mechanisms (e.g. trapping by light winds or shallow boundary layer) unless those appear in the top hypothesis's support list.
 10. Unverified News Handling: If open_questions mention an unverified news fire, treat it as uncertainty or distant context, not the primary cause.
+11. Reading Conflicts: If open_questions mention a mismatch between the reported AQI and a monitor reading, acknowledge it in one plain sentence that explains the difference (the AQI is a longer-term average; the monitor reading is current), and do not present it as a reason to doubt the overall AQI verdict.
 """
 
 def generate_fallback_narrative(
