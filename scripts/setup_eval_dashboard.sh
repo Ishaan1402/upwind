@@ -28,6 +28,14 @@ echo "==> 1/4 eval directory ($EVAL_DIR)"
 mkdir -p "$EVAL_DIR"
 chmod 755 "$EVAL_DIR"
 
+# nginx (www-data) must be able to traverse the home dir to reach the web
+# root; Oracle VM images often ship with a 750 home that blocks it and makes
+# auth_basic fail with HTTP 500. Adding other-execute allows traversal only.
+if [ "$(stat -c '%A' "$HOME" | cut -c9)" != "x" ]; then
+  chmod o+x "$HOME"
+  echo "    $HOME was not traversable by nginx; added other-execute"
+fi
+
 if [ -f "$HTPASSWD" ]; then
   echo "    htpasswd exists, keeping existing credentials"
 else
