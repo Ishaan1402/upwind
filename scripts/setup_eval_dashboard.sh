@@ -55,7 +55,13 @@ if [ -z "$SERVER_FILES" ]; then
   exit 1
 fi
 
-python3 - "$HTPASSWD" "$EVAL_DIR" "$SERVER_FILES" <<'PY'
+if [ "$HAS_SUDO" != 1 ]; then
+  echo "ERROR: passwordless sudo is required to edit the nginx config." >&2
+  echo "Run this script as a user with passwordless sudo, then re-run it." >&2
+  exit 1
+fi
+
+sudo python3 - "$HTPASSWD" "$EVAL_DIR" "$SERVER_FILES" <<'PY'
 import os
 import sys
 
@@ -134,7 +140,7 @@ echo "==> 3/4 nginx reload"
 if [ "$HAS_SUDO" = 1 ]; then
   if ! sudo nginx -t; then
     echo "nginx config invalid; rolling back..." >&2
-    python3 - "$SERVER_FILES" <<'PY'
+    sudo python3 - "$SERVER_FILES" <<'PY'
 import os, sys
 for p in sys.argv[1].splitlines():
     p = os.path.realpath(p.strip())
