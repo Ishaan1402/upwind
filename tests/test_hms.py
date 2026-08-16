@@ -12,9 +12,9 @@ from backend.services.hms import (
 @pytest.fixture(autouse=True)
 def _reset_hms_cache():
     """The HMS GeoJSON cache is module-global; reset it so tests stay isolated."""
-    hms_mod._hms_cache.update({"fetched_at": 0.0, "geojson": None})
+    hms_mod._hms_cache.clear()
     yield
-    hms_mod._hms_cache.update({"fetched_at": 0.0, "geojson": None})
+    hms_mod._hms_cache.clear()
 
 
 def _square_polygon(lon_min, lat_min, lon_max, lat_max):
