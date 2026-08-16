@@ -1,4 +1,5 @@
 from typing import Dict, Any, List, Optional
+import time
 import httpx
 
 # NOAA Hazard Mapping System (HMS) Smoke GeoJSON URLs
@@ -6,6 +7,13 @@ HMS_URLS = [
     "https://satepsanone.nesdis.noaa.gov/pub/FIRE/HMS/GIS/GEOJSON/hms_smoke_latest.json",
     "https://webapps.doughty.noaa.gov/hms/data/geojson/latest/hms_smoke_latest.geojson"
 ]
+
+# Density codes map to canonical labels
+_DENSITY_MAP = {
+    "5": "light", "light": "light",
+    "16": "medium", "medium": "medium",
+    "27": "heavy", "heavy": "heavy",
+}
 
 def point_in_polygon(x: float, y: float, poly: List[List[float]]) -> bool:
     """
@@ -26,6 +34,17 @@ def point_in_polygon(x: float, y: float, poly: List[List[float]]) -> bool:
                         inside = not inside
         p1x, p1y = p2x, p2y
     return inside
+
+def _point_in_ring_set(x: float, y: float, rings: List[List[List[float]]]) -> bool:
+    """
+    True when (x, y) is inside the exterior ring (rings[0]) and outside every
+    interior ring/hole (rings[1:]), per GeoJSON (RFC 7946 §3.1.6).
+    """
+    if not rings or not rings[0] or len(rings[0]) <= 2:
+        return False
+    if not point_in_polygon(x, y, rings[0]):
+        return False
+    return not any(point_in_polygon(x, y, hole) for hole in rings[1:] if hole and len(hole) > 2)
 
 def check_hms_smoke_plume(lat: float, lon: float, geojson_data: Dict[str, Any]) -> Dict[str, Any]:
     """
@@ -48,27 +67,21 @@ def check_hms_smoke_plume(lat: float, lon: float, geojson_data: Dict[str, Any]) 
 
         is_inside = False
         if geom_type == "Polygon":
-            # Outer ring is coords[0]
-            if coords and len(coords[0]) > 2:
-                if point_in_polygon(lon, lat, coords[0]):
-                    is_inside = True
+            is_inside = _point_in_ring_set(lon, lat, coords)
         elif geom_type == "MultiPolygon":
             for poly in coords:
-                if poly and len(poly[0]) > 2:
-                    if point_in_polygon(lon, lat, poly[0]):
-                        is_inside = True
-                        break
+                if _point_in_ring_set(lon, lat, poly):
+                    is_inside = True
+                    break
 
         if is_inside:
             found_densities.append(str(density_val))
 
     if found_densities:
-        # Determine highest density matched
+        # Determine the strongest density level matched
         dens_str = ", ".join(found_densities)
-        is_heavy = any("27" in d or "heavy" in d.lower() for d in found_densities)
-        is_med = any("16" in d or "med" in d.lower() for d in found_densities)
-        
-        density_label = "heavy" if is_heavy else ("medium" if is_med else "light")
+        levels = {_DENSITY_MAP.get(d.strip().lower()) for d in found_densities}
+        density_label = "heavy" if "heavy" in levels else ("medium" if "medium" in levels else "light")
         return {
             "status": "present",
             "density": density_label,
@@ -82,24 +95,42 @@ def check_hms_smoke_plume(lat: float, lon: float, geojson_data: Dict[str, Any]) 
         "details": "No overhead HMS smoke plume detected at this location"
     }
 
-async def fetch_hms_smoke(lat: float, lon: float) -> Dict[str, Any]:
-    """
-    Fetch NOAA HMS smoke GeoJSON and evaluate status for lat/lon.
-    """
+# Cache HMS GeoJSON response in memory (30 minute TTL)
+_HMS_CACHE_TTL_SECONDS = 30 * 60
+_hms_cache: Dict[str, Any] = {"fetched_at": 0.0, "geojson": None}
+
+
+async def _fetch_hms_geojson() -> Optional[Dict[str, Any]]:
+    """Download the HMS latest GeoJSON once per TTL window; None if unreachable."""
+    now = time.monotonic()
+    if _hms_cache["geojson"] is not None and (now - _hms_cache["fetched_at"]) < _HMS_CACHE_TTL_SECONDS:
+        return _hms_cache["geojson"]
+
     async with httpx.AsyncClient(timeout=8.0) as client:
         for url in HMS_URLS:
             try:
                 resp = await client.get(url)
                 if resp.status_code == 200:
                     geojson = resp.json()
-                    res = check_hms_smoke_plume(lat, lon, geojson)
-                    res["raw_geojson"] = geojson
-                    return res
+                    _hms_cache["fetched_at"] = time.monotonic()
+                    _hms_cache["geojson"] = geojson
+                    return geojson
             except Exception:
                 continue
 
-    return {
-        "status": "unavailable",
-        "density": None,
-        "details": "NOAA HMS smoke feed unreachable or offline"
-    }
+    return None
+
+
+async def fetch_hms_smoke(lat: float, lon: float) -> Dict[str, Any]:
+    """
+    Fetch NOAA HMS smoke GeoJSON and evaluate status for lat/lon.
+    The raw feed is never returned; only the plume status/density at the point.
+    """
+    geojson = await _fetch_hms_geojson()
+    if geojson is None:
+        return {
+            "status": "unavailable",
+            "density": None,
+            "details": "NOAA HMS smoke feed unreachable or offline"
+        }
+    return check_hms_smoke_plume(lat, lon, geojson)
