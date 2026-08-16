@@ -1,9 +1,12 @@
 import time
 import asyncio
-from typing import Dict, Any, List, Optional, Tuple
+from typing import Dict, Any, List, Optional, Tuple, AsyncGenerator
 from backend.services.openmeteo import fetch_openmeteo_weather
 from backend.services.aod import fetch_aod_signal
 from backend.services.firms import fetch_firms_hotspots
+from backend.services.hms import fetch_hms_smoke
+from backend.services.wfigs import fetch_wfigs_incident
+from backend.services.place_context import fetch_place_context
 from backend.services.incident_search import search_fire_incident_name
 from backend.services.openaq import (
     discover_reference_monitors,
@@ -19,9 +22,12 @@ from backend.services.openaq import (
 TOOL_STEPS = {
     "weather_vector": "Calculating Open-Meteo wind trajectory & temperature",
     "aod_density": "Reading CAMS Aerosol Optical Depth (AOD) column density",
+    "hms_scan": "Checking NOAA smoke-plume analysis overhead",
+    "wfigs_scan": "Checking federal wildfire incident registry",
     "firms_scan": "Scanning NASA FIRMS thermal hotspot clusters upwind",
     "web_search": "Searching public news & active incident feeds (Web Search)",
     "openaq_monitors": "Reading local monitor concentrations (OpenAQ)",
+    "place_context": "Looking up local population context (Census)",
     "score_hypotheses": "Scoring attribution hypotheses (Evidence Matrix)"
 }
 
@@ -46,15 +52,7 @@ def _openaq_unavailable_signal(detail: str) -> Dict[str, Any]:
 async def collect_openaq_signal(
     lat: float, lon: float, include_baselines: bool = True
 ) -> Dict[str, Any]:
-    """
-    Gather OpenAQ reference-monitor concentrations for attribution.
-
-    Only fresh (<=3h), US reference-monitor readings are included; anything
-    else results in an "unavailable" signal so scoring behaves as before.
-    Baseline percentiles are skipped when include_baselines is False (Good-AQI
-    briefings never use them, so the extra calls are wasted latency).
-    Never raises.
-    """
+    # Gather OpenAQ data; fetch past 3h US reference data for attribution. Fall back to "unavailable" on missing or stale data, skips baselines when include_baselines=False to save latency.
     try:
         candidates = await discover_reference_monitors(lat, lon, limit=3)
         if not candidates:
@@ -62,7 +60,7 @@ async def collect_openaq_signal(
                 "No air quality monitor within 25 km (or OpenAQ key not configured)"
             )
 
-        # Fetch fresh readings for all nearby candidates concurrently.
+        # Fetch fresh readings for all nearby candidates concurrently
         latest_by_id: Dict[Any, Dict[str, Any]] = {}
         results = await asyncio.gather(
             *(fetch_latest(c["location_id"]) for c in candidates),
@@ -72,8 +70,7 @@ async def collect_openaq_signal(
             if isinstance(candidate_readings, dict) and candidate_readings:
                 latest_by_id[candidate["location_id"]] = candidate_readings
 
-        # A dead feed on the nearest monitor must not block a live one further
-        # out: widen to the max radius when nothing nearby has fresh readings.
+        # Widen radius when nearest monitor lacks fresh readings
         if not latest_by_id:
             wider = await discover_reference_monitors(lat, lon, limit=10, radius_m=OPENAQ_RADIUS_M)
             if wider:
@@ -88,10 +85,7 @@ async def collect_openaq_signal(
                         latest_by_id[candidate["location_id"]] = candidate_readings
                 candidates = candidates + wider
 
-        # Freshness-aware selection among candidates (nearest-first):
-        # 1) nearest with BOTH live PM2.5 and PM10 (enables the dust/smoke ratio),
-        # 2) else nearest with live PM2.5,
-        # 3) else nearest with any fresh readings.
+        # Select nearest candidate with live PM2.5 and PM10 readings
         monitor = None
         readings: Dict[str, Any] = {}
         pm25_monitor, pm25_readings = None, {}
@@ -159,13 +153,14 @@ async def collect_openaq_signal(
         sensors_map = await fetch_location_sensors(location_id)
         pm25_sensor_id = sensor_id_for_parameter(sensors_map, "pm25")
         if include_baselines and pm25_sensor_id is not None and pm25:
-            daily = await fetch_daily_baseline(pm25_sensor_id)
-            if daily:
-                signal["daily_percentile"] = daily["percentile"]
-            same_hour = await fetch_same_hour_baseline(
-                pm25_sensor_id, monitor.get("timezone"), pm25["value"]
+            daily, same_hour = await asyncio.gather(
+                fetch_daily_baseline(pm25_sensor_id),
+                fetch_same_hour_baseline(pm25_sensor_id, monitor.get("timezone"), pm25["value"]),
+                return_exceptions=True,
             )
-            if same_hour:
+            if isinstance(daily, dict) and daily:
+                signal["daily_percentile"] = daily["percentile"]
+            if isinstance(same_hour, dict) and same_hour:
                 signal["same_hour_percentile"] = same_hour["percentile"]
                 signal["same_hour_median"] = same_hour["median"]
 
@@ -173,6 +168,141 @@ async def collect_openaq_signal(
     except Exception as e:
         print(f"[OpenAQ Service Error]: {e}")
         return _openaq_unavailable_signal("OpenAQ concentration feed unavailable")
+
+
+def _unavailable_feed_result(fallback: Dict[str, Any], detail: str) -> Dict[str, Any]:
+    """Normalize a raised or empty tool result into an unavailable signal payload."""
+    if isinstance(fallback, BaseException):
+        return {"status": "unavailable", "details": detail}
+    return fallback if fallback else {"status": "unavailable", "details": detail}
+
+
+async def iter_evidence_signals(
+    location: Dict[str, Any],
+    observation: Dict[str, Any],
+) -> AsyncGenerator[Tuple[str, Dict[str, Any]], None]:
+    """
+    DAG implementation to concurrently '_run' tasks. Applied conditional branching because FIRMS and WFIGS tasks require wind
+    to be calculated first. Also web search is gated by AOD and FIRMS. All concurrent tasks are executed in the TaskGroup and 
+    output in the subsequent 'assemble_evidence_signals' function. 
+
+    TODO: Clean up all calls with single shared API client 
+    """
+    lat = location["lat"]
+    lon = location["lon"]
+    state = location.get("state")
+    city = location.get("city")
+
+    events: asyncio.Queue = asyncio.Queue()
+
+    # Map backend feed status to trace step status
+    _STEP_STATUS = {"present": "done", "absent": "absent", "unavailable": "warning"}
+
+    def _start(step: str) -> Tuple[str, Dict[str, Any]]:
+        return ("tool_start", {"step": step, "label": TOOL_STEPS[step]})
+
+    async def _run_feed(step, coro, unavailable_detail):
+        """Run a feed coroutine, emitting tool_start/tool_done with its own duration."""
+        events.put_nowait(_start(step))
+        t0 = time.perf_counter()
+        try:
+            result = await coro
+        except Exception:
+            result = None
+        dur = (time.perf_counter() - t0) * 1000
+        result = _unavailable_feed_result(result, unavailable_detail)
+        status = _STEP_STATUS.get(result.get("status"), "done")
+        events.put_nowait(("tool_done", create_trace_step(step, dur, status)))
+        return result
+
+    async def _run_weather():
+        events.put_nowait(_start("weather_vector"))
+        t0 = time.perf_counter()
+        try:
+            weather = await fetch_openmeteo_weather(lat, lon)
+        except Exception:
+            weather = None
+        dur = (time.perf_counter() - t0) * 1000
+        events.put_nowait(("tool_done", create_trace_step("weather_vector", dur, "done" if weather else "warning")))
+        return weather
+
+    async def _run_web_search():
+        events.put_nowait(_start("web_search"))
+        t0 = time.perf_counter()
+        try:
+            name = await search_fire_incident_name(state, city, lat, lon)
+        except Exception:
+            name = None
+        dur = (time.perf_counter() - t0) * 1000
+        events.put_nowait(("tool_done", create_trace_step("web_search", dur, "done" if name else "absent")))
+        return name
+
+    async def _orchestrate():
+        try:
+            async with asyncio.TaskGroup() as tg:
+                is_pm_elevated = (
+                    observation.get("aqi", 0) > 50 and "PM" in observation.get("primary_pollutant", "").upper()
+                )
+
+                # T=0: independent position-only tasks
+                weather_t = tg.create_task(_run_weather())
+                aod_t = tg.create_task(_run_feed(
+                    "aod_density", fetch_aod_signal(lat, lon, observation.get("aerosol_optical_depth")), "AOD feed unavailable"
+                ))
+                hms_t = tg.create_task(_run_feed("hms_scan", fetch_hms_smoke(lat, lon), "NOAA HMS smoke feed unavailable"))
+                openaq_t = tg.create_task(_run_feed(
+                    "openaq_monitors", collect_openaq_signal(lat, lon, include_baselines=observation.get("aqi", 0) > 50),
+                    "OpenAQ concentration feed unavailable",
+                ))
+                place_t = tg.create_task(_run_feed(
+                    "place_context", fetch_place_context(location.get("zip_code")), "Census place context unavailable",
+                ))
+                web_t = tg.create_task(_run_web_search()) if is_pm_elevated else None
+
+                # Start wind-dependent feeds once weather resolves
+                weather = await weather_t
+                wind_speed = weather.get("wind_speed_mph") if weather else None
+                wind_dir = weather.get("wind_direction_deg") if weather else None
+                firms_t = tg.create_task(_run_feed("firms_scan", fetch_firms_hotspots(lat, lon, wind_dir, wind_speed), "NASA FIRMS unavailable"))
+                wfigs_t = tg.create_task(_run_feed("wfigs_scan", fetch_wfigs_incident(lat, lon, wind_dir), "NIFC WFIGS incident feed unavailable"))
+
+                aod = await aod_t
+                firms = await firms_t
+
+                # Run web search for non-elevated PM only if fire evidence exists
+                if web_t is None and (firms.get("status") == "present" or aod.get("status") == "present"):
+                    web_t = tg.create_task(_run_web_search())
+                if web_t is None:
+                    # Resolve skipped search step with absent status
+                    events.put_nowait(("tool_start", {"step": "web_search", "label": TOOL_STEPS["web_search"]}))
+                    events.put_nowait(("tool_done", create_trace_step("web_search", 0.0, "absent")))
+
+                hms = await hms_t
+                wfigs = await wfigs_t
+                openaq = await openaq_t
+                place = await place_t
+                incident_name = await web_t if web_t else None
+
+            signals = build_evidence_signals(
+                observation, weather, aod, firms, incident_name, openaq, hms, wfigs, place
+            )
+        except Exception as exc:
+            # Fall back to empty signals on orchestration exception
+            print(f"[Evidence Pipeline Error]: {exc}")
+            signals = []
+        events.put_nowait(("signals", signals))
+
+    orch_task = asyncio.create_task(_orchestrate())
+
+    try:
+        while True:
+            kind, payload = await events.get()
+            yield (kind, payload)
+            if kind == "signals":
+                return
+    finally:
+        # Cancel orchestrator and active child tasks on client disconnect
+        orch_task.cancel()
 
 
 async def assemble_evidence_signals(
@@ -184,63 +314,14 @@ async def assemble_evidence_signals(
     Measures exact real execution timing for each backend tool step.
     Returns (signals, execution_trace).
     """
-    lat = location["lat"]
-    lon = location["lon"]
-    state = location.get("state")
-    city = location.get("city")
-
-    execution_trace = []
-
-    # Step 1: Open-Meteo Weather (Wind, Temp & Boundary Layer Height)
-    t0 = time.perf_counter()
-    weather = await fetch_openmeteo_weather(lat, lon)
-    t1 = time.perf_counter()
-    execution_trace.append(create_trace_step("weather_vector", (t1 - t0) * 1000, "done" if weather else "warning"))
-
-    wind_speed = weather.get("wind_speed_mph") if weather else None
-    wind_dir = weather.get("wind_direction_deg") if weather else None
-
-    # Step 2: CAMS Aerosol Optical Depth (AOD)
-    t0 = time.perf_counter()
-    existing_aod = observation.get("aerosol_optical_depth")
-    aod_res = await fetch_aod_signal(lat, lon, existing_aod)
-    t1 = time.perf_counter()
-    execution_trace.append(create_trace_step("aod_density", (t1 - t0) * 1000, aod_res.get("status", "done")))
-
-    # Step 3: NASA FIRMS Upwind Hotspots
-    t0 = time.perf_counter()
-    firms_res = await fetch_firms_hotspots(lat, lon, wind_dir, wind_speed)
-    t1 = time.perf_counter()
-    execution_trace.append(create_trace_step("firms_scan", (t1 - t0) * 1000, firms_res.get("status", "done")))
-
-    # Step 4: Web Search for active fire incidents
-    t0 = time.perf_counter()
-    incident_name = None
-    primary_pollutant = observation.get("primary_pollutant", "").upper()
-    is_pm_elevated = observation.get("aqi", 0) > 50 and "PM" in primary_pollutant
-    if is_pm_elevated or firms_res["status"] == "present" or aod_res["status"] == "present":
-        incident_name = await search_fire_incident_name(state, city, lat, lon)
-    t1 = time.perf_counter()
-
-    execution_trace.append(create_trace_step("web_search", (t1 - t0) * 1000, "done" if incident_name else "absent"))
-
-    # Step 5: OpenAQ Reference Monitor Concentrations
-    t0 = time.perf_counter()
-    openaq_sig = await collect_openaq_signal(
-        lat, lon, include_baselines=observation.get("aqi", 0) > 50
-    )
-    t1 = time.perf_counter()
-    execution_trace.append(create_trace_step(
-        "openaq_monitors",
-        (t1 - t0) * 1000,
-        "done" if openaq_sig.get("status") == "present" else "warning"
-    ))
-
-    signals = build_evidence_signals(
-        observation, weather, aod_res, firms_res, incident_name, openaq_sig
-    )
-
-    return signals, execution_trace
+    execution_trace: List[Dict[str, Any]] = []
+    signals: Optional[List[Dict[str, Any]]] = None
+    async for kind, payload in iter_evidence_signals(location, observation):
+        if kind == "tool_done":
+            execution_trace.append(payload)
+        elif kind == "signals":
+            signals = payload
+    return signals or [], execution_trace
 
 
 def build_evidence_signals(
@@ -250,6 +331,9 @@ def build_evidence_signals(
     firms_res: Dict[str, Any],
     incident_name: Optional[str],
     openaq_sig: Dict[str, Any],
+    hms_res: Optional[Dict[str, Any]] = None,
+    wfigs_res: Optional[Dict[str, Any]] = None,
+    place_res: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
     """
     Build the shared evidence signals list for both /api/why paths.
@@ -257,8 +341,13 @@ def build_evidence_signals(
     The non-streaming and streaming (SSE) endpoints must present identical
     evidence to scoring and the LLM. Incident names are passed through raw;
     scoring decides whether they are corroborated by hotspots (fire vote) or
-    become unverified-news open questions.
+    become unverified-news open questions. hms_res/wfigs_res default to None
+    (treated as an unavailable feed) so callers that predate the new feeds
+    keep working.
     """
+    hms_res = hms_res or {"status": "unavailable", "details": "NOAA HMS smoke feed not queried"}
+    wfigs_res = wfigs_res or {"status": "unavailable", "details": "WFIGS incident feed not queried"}
+    place_res = place_res or {"status": "unavailable", "details": "Census place context not queried"}
     aqi_val = observation.get("aqi", 0)
     primary_pollutant = observation.get("primary_pollutant", "").upper()
     pollutants = observation.get("pollutants", {})
@@ -288,7 +377,16 @@ def build_evidence_signals(
         "details": aod_res.get("details", "")
     })
 
-    # Signal 2: FIRMS Upwind Hotspots
+    # Signal 2: NOAA HMS Smoke Plume Analysis
+    signals.append({
+        "id": "hms_smoke",
+        "label": "NOAA Smoke-Plume Analysis (HMS)",
+        "status": hms_res.get("status", "unavailable"),
+        "density": hms_res.get("density"),
+        "details": hms_res.get("details", ""),
+    })
+
+    # Signal 3: FIRMS Upwind Hotspots
     firms_status = firms_res["status"]
     firms_details = firms_res.get("details", "")
     aod_value = float(aod_res.get("aod_value") or 0.0)
@@ -309,9 +407,21 @@ def build_evidence_signals(
         "details": firms_details
     })
 
-    # Signal 3: Wind Field & Boundary Layer Height
+    # Signal 4: WFIGS Federal Incident Registry
+    signals.append({
+        "id": "wfigs_incident",
+        "label": "Federal Wildfire Incident Registry (WFIGS)",
+        "status": wfigs_res.get("status", "unavailable"),
+        "incident": wfigs_res.get("incident"),
+        "count": wfigs_res.get("count", 0),
+        "alignment": wfigs_res.get("alignment"),
+        "details": wfigs_res.get("details", ""),
+    })
+
+    # Signal 5: Wind Field & Boundary Layer Height
     if weather and wind_speed is not None and wind_dir is not None:
-        upwind_dir = (wind_dir + 180) % 360
+        # Wind direction is meteorological origin (upwind bearing)
+        upwind_dir = wind_dir % 360
         
         signals.append({
             "id": "wind",
@@ -365,6 +475,16 @@ def build_evidence_signals(
         "hot_day": is_hot,
         "temperature_f": temp_f,
         "details": f"O3 Primary: {is_o3_primary}, Temperature: {f'{temp_f}°F' if temp_f else 'N/A'}"
+    })
+
+    # Signal 6: Local Population Context (Census)
+    signals.append({
+        "id": "place_context",
+        "label": "Local Population Context (Census)",
+        "status": place_res.get("status", "unavailable"),
+        "population": place_res.get("population"),
+        "rural": place_res.get("rural"),
+        "details": place_res.get("details", ""),
     })
 
     signals.append(openaq_sig)

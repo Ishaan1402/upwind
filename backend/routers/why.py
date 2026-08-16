@@ -7,16 +7,12 @@ from pydantic import BaseModel
 from typing import Dict, Any, Optional, List
 from datetime import datetime, timezone
 
-from backend.services.openmeteo import fetch_openmeteo_weather, fetch_openmeteo_aqi
-from backend.services.aod import fetch_aod_signal
-from backend.services.firms import fetch_firms_hotspots
-from backend.services.incident_search import search_fire_incident_name
+from backend.services.openmeteo import fetch_openmeteo_aqi
 from backend.engine.signals import (
     assemble_evidence_signals,
-    build_evidence_signals,
+    iter_evidence_signals,
     TOOL_STEPS,
     create_trace_step,
-    collect_openaq_signal,
 )
 from backend.engine.score import score_hypotheses
 from backend.llm import generate_narrative_briefing, generate_narrative_briefing_stream, generate_fallback_narrative
@@ -29,15 +25,23 @@ class WhyRequest(BaseModel):
     location: Dict[str, Any]
     observation: Dict[str, Any]
 
+# strong reference to prevent garbage collection; keeps LLM judge task running in background
+_background_tasks: set = set()
+
+
+def _schedule_background(coro):
+    task = asyncio.create_task(coro)
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+    return task
+
 async def _async_judge_streamed_narrative(evidence_payload: Dict[str, Any], full_narrative: str, cache_key: str):
     """Post-hoc non-blocking evaluation of streamed narrative."""
     try:
         verdict = await judge_narrative(evidence_payload, full_narrative)
         update_cached_verdict(cache_key, verdict)
         if verdict.get("verdict") == "fail":
-            # Cache-heal: replace the failed narrative with the deterministic
-            # fallback so every later viewer of this location/hour gets the
-            # corrected text instead of the rejected one.
+            # Replace rejected narrative with safe fallback in cache
             fallback = generate_fallback_narrative(
                 evidence_payload["location"],
                 evidence_payload["observation"],
@@ -55,8 +59,8 @@ async def get_why_explanation(req: WhyRequest):
     """
     Main attribution explanation endpoint:
     1. Assembles live environmental evidence signals (AOD, FIRMS, Wind, PM level, Ozone).
-    2. Deterministically scores & ranks the 5 attribution hypotheses (Evidence Matrix).
-    3. Synthesizes a natural language briefing via DeepSeek.
+    2. Deterministically scores & ranks the 5 attribution hypotheses (check score.py).
+    3. Synthesizes a natural language briefing via LLM (most likely DeepSeek).
     4. Evaluates narrative grounding via LLM Judge (Groq API).
     5. Returns signals, hypotheses, briefing, and map layers.
     """
@@ -65,9 +69,14 @@ async def get_why_explanation(req: WhyRequest):
 
     loc_key = location.get("zip_code") or f"{location.get('lat', 0):.2f}_{location.get('lon', 0):.2f}"
     hour_stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H")
-    cache_key = f"why_{loc_key}_{hour_stamp}"
+    # Include pollutant and AQI value in cache key in case air quality shifts
+    cache_key = (
+        f"why_v2_{loc_key}_{observation.get('aqi', 0)}_"
+        f"{observation.get('primary_pollutant', '')}_{hour_stamp}"
+    )
 
     # Step 1-4: Assemble signals (records tool execution timing)
+    t_start = time.perf_counter()
     signals, execution_trace = await assemble_evidence_signals(location, observation)
     
     # Step 5: Score hypotheses tool call
@@ -75,6 +84,7 @@ async def get_why_explanation(req: WhyRequest):
     hypotheses, open_questions = score_hypotheses(observation, signals)
     t1 = time.perf_counter()
     execution_trace.append(create_trace_step("score_hypotheses", (t1 - t0) * 1000, "done"))
+    total_ms = (time.perf_counter() - t_start) * 1000
 
     # DeepSeek Briefing Synthesis (Separate from tool trace)
     cached_narrative = get_cached_narrative(cache_key)
@@ -125,6 +135,7 @@ async def get_why_explanation(req: WhyRequest):
         "open_questions": open_questions,
         "narrative": narrative,
         "execution_trace": execution_trace,
+        "total_ms": total_ms,
         "map_layers": map_layers
     }
 
@@ -172,81 +183,29 @@ async def stream_why_explanation(
             "aqi": aqi,
             "primary_pollutant": primary_pollutant or "PM2.5",
             "category": category or "Moderate",
-            # The client only reports AQI here, not a measured concentration;
-            # do not fabricate a PM2.5 value (it would be mislabeled µg/m³).
+            # Client reports AQI only without measured concentration
             "pollutants": {}
         }
 
     async def sse_event_generator():
         execution_trace = []
+        t_start = time.perf_counter()
         loc_key = zip_code or f"{lat:.2f}_{lon:.2f}"
         hour_stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H")
-        cache_key = f"why_{loc_key}_{hour_stamp}"
-
-        # 1. Weather Vector Tool
-        yield f"event: tool_start\ndata: {json.dumps({'step': 'weather_vector', 'label': TOOL_STEPS['weather_vector']})}\n\n"
-        t0 = time.perf_counter()
-        weather = await fetch_openmeteo_weather(lat, lon)
-        t1 = time.perf_counter()
-        wind_speed = weather.get("wind_speed_mph") if weather else None
-        wind_dir = weather.get("wind_direction_deg") if weather else None
-
-        weather_trace = create_trace_step("weather_vector", (t1 - t0) * 1000, "done" if weather else "warning")
-        execution_trace.append(weather_trace)
-        yield f"event: tool_done\ndata: {json.dumps(weather_trace)}\n\n"
-
-        # 2. AOD Density Tool
-        yield f"event: tool_start\ndata: {json.dumps({'step': 'aod_density', 'label': TOOL_STEPS['aod_density']})}\n\n"
-        t0 = time.perf_counter()
-        aod_res = await fetch_aod_signal(lat, lon)
-        t1 = time.perf_counter()
-        aod_trace = create_trace_step("aod_density", (t1 - t0) * 1000, aod_res.get("status", "done"))
-        execution_trace.append(aod_trace)
-        yield f"event: tool_done\ndata: {json.dumps(aod_trace)}\n\n"
-
-        # 3. FIRMS Scan Tool
-        yield f"event: tool_start\ndata: {json.dumps({'step': 'firms_scan', 'label': TOOL_STEPS['firms_scan']})}\n\n"
-        t0 = time.perf_counter()
-        firms_res = await fetch_firms_hotspots(lat, lon, wind_dir, wind_speed)
-        t1 = time.perf_counter()
-        firms_trace = create_trace_step("firms_scan", (t1 - t0) * 1000, firms_res.get("status", "done"))
-        execution_trace.append(firms_trace)
-        yield f"event: tool_done\ndata: {json.dumps(firms_trace)}\n\n"
-
-        # 4. Web Search Tool
-        yield f"event: tool_start\ndata: {json.dumps({'step': 'web_search', 'label': TOOL_STEPS['web_search']})}\n\n"
-        t0 = time.perf_counter()
-        aqi_val = observation.get("aqi", 0)
-        primary_pollutant = observation.get("primary_pollutant", "").upper()
-        is_pm_primary = "PM" in primary_pollutant
-        is_pm_elevated = aqi_val > 50 and is_pm_primary
-
-        incident_name = None
-        if is_pm_elevated or firms_res["status"] == "present" or aod_res["status"] == "present":
-            incident_name = await search_fire_incident_name(state, city, lat, lon)
-        t1 = time.perf_counter()
-
-        web_trace = create_trace_step("web_search", (t1 - t0) * 1000, "done" if incident_name else "absent")
-        execution_trace.append(web_trace)
-        yield f"event: tool_done\ndata: {json.dumps(web_trace)}\n\n"
-
-        # 5. OpenAQ Reference Monitor Concentrations Tool
-        yield f"event: tool_start\ndata: {json.dumps({'step': 'openaq_monitors', 'label': TOOL_STEPS['openaq_monitors']})}\n\n"
-        t0 = time.perf_counter()
-        openaq_sig = await collect_openaq_signal(lat, lon, include_baselines=aqi_val > 50)
-        t1 = time.perf_counter()
-        openaq_trace = create_trace_step(
-            "openaq_monitors",
-            (t1 - t0) * 1000,
-            "done" if openaq_sig.get("status") == "present" else "warning"
+        cache_key = (
+            f"why_v2_{loc_key}_{observation.get('aqi', 0)}_"
+            f"{observation.get('primary_pollutant', '')}_{hour_stamp}"
         )
-        execution_trace.append(openaq_trace)
-        yield f"event: tool_done\ndata: {json.dumps(openaq_trace)}\n\n"
 
-        # Assemble final signals (shared shape with the non-stream /api/why path)
-        signals = build_evidence_signals(
-            observation, weather, aod_res, firms_res, incident_name, openaq_sig
-        )
+        # Stream evidence tool execution events
+        async for kind, payload in iter_evidence_signals(location, observation):
+            if kind == "tool_start":
+                yield f"event: tool_start\ndata: {json.dumps(payload)}\n\n"
+            elif kind == "tool_done":
+                execution_trace.append(payload)
+                yield f"event: tool_done\ndata: {json.dumps(payload)}\n\n"
+            else:  # "signals"
+                signals = payload
 
         # 5. Score Hypotheses Tool
         yield f"event: tool_start\ndata: {json.dumps({'step': 'score_hypotheses', 'label': TOOL_STEPS['score_hypotheses']})}\n\n"
@@ -256,6 +215,7 @@ async def stream_why_explanation(
         score_trace = create_trace_step("score_hypotheses", (t1 - t0) * 1000, "done")
         execution_trace.append(score_trace)
         yield f"event: tool_done\ndata: {json.dumps(score_trace)}\n\n"
+        total_ms = (time.perf_counter() - t_start) * 1000
 
         firms_sig = next((s for s in signals if s["id"] == "firms_upwind"), None)
         map_layers = {}
@@ -267,7 +227,8 @@ async def stream_why_explanation(
             "hypotheses": hypotheses,
             "open_questions": open_questions,
             "map_layers": map_layers,
-            "execution_trace": execution_trace
+            "execution_trace": execution_trace,
+            "total_ms": total_ms
         }
         yield f"event: signals_ready\ndata: {json.dumps(signals_payload)}\n\n"
 
@@ -277,10 +238,8 @@ async def stream_why_explanation(
 
         if cached_narrative:
             full_narrative = cached_narrative
-            words = cached_narrative.split(" ")
-            for w in words:
-                yield f"event: llm_token\ndata: {json.dumps({'token': w + ' '})}\n\n"
-                await asyncio.sleep(0.015)
+            # Return cached narrative immediately without word streaming
+            yield f"event: llm_token\ndata: {json.dumps({'token': cached_narrative})}\n\n"
         else:
             async for token in generate_narrative_briefing_stream(location, observation, signals, hypotheses, open_questions):
                 full_narrative += token
@@ -295,8 +254,8 @@ async def stream_why_explanation(
                 "narrative": full_narrative
             }
             set_cached_narrative(cache_key, full_narrative, evidence_payload)
-            # Post-hoc non-blocking judge check
-            asyncio.create_task(_async_judge_streamed_narrative(evidence_payload, full_narrative, cache_key))
+            # Run non-blocking narrative judge check in background
+            _schedule_background(_async_judge_streamed_narrative(evidence_payload, full_narrative, cache_key))
 
         yield f"event: complete\ndata: {json.dumps({'narrative': full_narrative, 'execution_trace': execution_trace})}\n\n"
 
