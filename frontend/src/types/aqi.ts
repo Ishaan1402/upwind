@@ -63,6 +63,7 @@ export interface WhyResponse {
   open_questions: string[];
   narrative: string;
   execution_trace?: ExecutionTraceStep[];
+  total_ms?: number;
   map_layers?: {
     firms_hotspots?: Array<{ lat: number; lon: number; frp?: number; distance_km?: number }>;
     hms_polygons?: any; // GeoJSON
