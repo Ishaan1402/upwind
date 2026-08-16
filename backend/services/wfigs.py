@@ -8,21 +8,27 @@ from backend.services.firms import (
     angular_difference,
     UPWIND_SECTOR_WIDTH_DEG,
 )
+from backend.engine.params import (
+    WFIGS_ACTIVITY_FLOOR,
+    WFIGS_DEFAULT_SIZE_ACRES,
+    WFIGS_MAX_CONTAINMENT_PCT,
+    WFIGS_MAX_RADIUS_MILES,
+    WFIGS_RELEVANCE_EPS_MILES,
+    WFIGS_UPWIND_BONUS,
+)
 
 # NIFC WFIGS current incident locations endpoint
 WFIGS_URLS = [
     "https://services3.arcgis.com/T4QMspbfLg3qTGWY/arcgis/rest/services/WFIGS_Incident_Locations_Current/FeatureServer/0/query",
 ]
 
-WFIGS_MAX_RADIUS_MILES = 300.0
-# Skip incidents above 90% containment
-WFIGS_MAX_CONTAINMENT_PCT = 90.0
 # Maximum records to retrieve per spatial query
 WFIGS_RECORD_CAP = 200
 
 WFIGS_OUT_FIELDS = (
     "IncidentName,IncidentSize,PercentContained,POOState,POOCounty,"
-    "FireDiscoveryDateTime,ModifiedOnDateTime_dt,IrwinID,GlobalID"
+    "FireDiscoveryDateTime,ModifiedOnDateTime_dt,IrwinID,GlobalID,"
+    "IsCpxChild,CpxName,CpxID"
 )
 
 
@@ -37,19 +43,92 @@ def _parse_optional_float(value: Any) -> Optional[float]:
         return None
 
 
-def _select_nearest_wildfire(
+def _parse_optional_bool(value: Any) -> bool:
+    """Parse an ArcGIS boolean field defensively: ArcGIS may return real JSON
+    booleans or string forms like 'true'/'false'."""
+    if isinstance(value, bool):
+        return value
+    if value is None or value == "":
+        return False
+    return str(value).strip().lower() in ("true", "1", "yes")
+
+
+def _complex_group_key(incident: Dict[str, Any]) -> Optional[str]:
+    """Group key for fire-complex collapse: a shared CpxID, or - when the
+    child has no id but is flagged as a complex child with a name - the shared
+    CpxName. Lone (non-complex) incidents return None and pass through."""
+    if incident.get("cpx_id"):
+        return f"id:{incident['cpx_id']}"
+    if incident.get("is_cpx_child") and incident.get("cpx_name"):
+        return f"name:{incident['cpx_name']}"
+    return None
+
+
+def _merge_complex_children(children: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Merge WFIGS complex children into one representative incident dict.
+
+    The representative takes its name from the complex name when present (else
+    the largest child's name), size = SUM of child sizes, containment = MIN of
+    child containment (a complex is only as contained as its least-contained
+    child), distance/bearing from the nearest child point, and is_upwind True
+    if any child is upwind. All other fields come from the nearest child."""
+    nearest = min(children, key=lambda c: c["distance_miles"])
+    sizes = [c["size_acres"] for c in children if c["size_acres"] is not None]
+    containments = [
+        c["percent_contained"] for c in children if c["percent_contained"] is not None
+    ]
+
+    cpx_name = next((c["cpx_name"] for c in children if c.get("cpx_name")), None)
+    if cpx_name:
+        name = cpx_name
+    else:
+        name = max(children, key=lambda c: c["size_acres"] or 0)["name"]
+
+    merged = dict(nearest)
+    merged["name"] = name
+    merged["size_acres"] = sum(sizes) if sizes else None
+    merged["percent_contained"] = min(containments) if containments else None
+    merged["is_upwind"] = any(c["is_upwind"] for c in children)
+    merged["is_cpx_child"] = True
+    return merged
+
+
+def _collapse_complexes(incidents: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Collapse fire-complex children into a single representative incident each.
+
+    Children that share the same non-empty cpx_id (or, when the id is missing
+    but the incident is flagged as a complex child with a name, the same
+    cpx_name) merge into one entry via _merge_complex_children. Lone
+    (non-complex) incidents pass through unchanged."""
+    grouped: Dict[str, List[Dict[str, Any]]] = {}
+    for incident in incidents:
+        key = _complex_group_key(incident)
+        if key is not None:
+            grouped.setdefault(key, []).append(incident)
+
+    collapsed = [i for i in incidents if _complex_group_key(i) is None]
+    collapsed.extend(_merge_complex_children(group) for group in grouped.values())
+    return collapsed
+
+
+def _select_relevant_wildfires(
     features: List[Dict[str, Any]],
     target_lat: float,
     target_lon: float,
     wind_dir_deg: Optional[float],
 ) -> List[Dict[str, Any]]:
     """
-    Convert raw WFIGS features into incident dicts and keep only those that
-    qualify as potential smoke sources: a named wildfire within
-    WFIGS_MAX_RADIUS_MILES that is not >90% contained. Rows with missing or
-    invalid coordinates are ignored. Distance/bearing are computed from the
-    target (bearing = direction the incident sits from the target); upwind
-    means within UPWIND_SECTOR_WIDTH_DEG of the wind's FROM direction.
+    Convert raw WFIGS features into incident dicts, collapse fire complexes,
+    and rank the survivors by smoke relevance (size x activity x upwind
+    alignment x distance decay) so the largest, most-active, upwind fire wins
+    instead of simply the nearest one.
+
+    Only named wildfires within WFIGS_MAX_RADIUS_MILES that are not >90%
+    contained qualify. Rows with missing or invalid coordinates are ignored.
+    Distance/bearing are computed from the target (bearing = direction the
+    incident sits from the target); upwind means within
+    UPWIND_SECTOR_WIDTH_DEG of the wind's FROM direction. Each returned
+    incident carries a rounded `relevance` score.
     """
     incidents: List[Dict[str, Any]] = []
     for feature in features:
@@ -97,9 +176,28 @@ def _select_nearest_wildfire(
             "bearing": bearing_degrees_to_compass(bearing_deg),
             "bearing_deg": round(bearing_deg, 1),
             "is_upwind": is_upwind,
+            "cpx_id": str(props.get("CpxID") or "").strip() or None,
+            "cpx_name": str(props.get("CpxName") or "").strip() or None,
+            "is_cpx_child": _parse_optional_bool(props.get("IsCpxChild")),
         })
 
-    incidents.sort(key=lambda i: i["distance_miles"])
+    incidents = _collapse_complexes(incidents)
+
+    for incident in incidents:
+        activity = max(
+            1.0 - (incident["percent_contained"] or 0.0) / 100.0,
+            WFIGS_ACTIVITY_FLOOR,
+        )
+        size = (
+            incident["size_acres"]
+            if incident["size_acres"] is not None
+            else WFIGS_DEFAULT_SIZE_ACRES
+        )
+        upwind = WFIGS_UPWIND_BONUS if incident["is_upwind"] else 1.0
+        decay = 1.0 / (incident["distance_miles"] + WFIGS_RELEVANCE_EPS_MILES)
+        incident["relevance"] = round(size * activity * upwind * decay, 1)
+
+    incidents.sort(key=lambda i: i["relevance"], reverse=True)
     return incidents
 
 
@@ -109,10 +207,11 @@ async def fetch_wfigs_incident(
     wind_dir_deg: Optional[float] = None,
 ) -> Dict[str, Any]:
     """
-    Query the NIFC WFIGS current-incident feed for the nearest active wildfire
-    that could carry smoke toward the target. Never raises: feed errors return
-    status "unavailable"; healthy query with no qualifying incidents return
-    "absent".
+    Query the NIFC WFIGS current-incident feed for the most relevant active
+    wildfire that could carry smoke toward the target (largest, least-contained,
+    upwind fire rather than merely the nearest). Never raises: feed errors
+    return status "unavailable"; healthy query with no qualifying incidents
+    return "absent".
     """
     params = {
         "f": "geojson",
@@ -140,7 +239,7 @@ async def fetch_wfigs_incident(
                 # Treat ArcGIS error payloads as feed outage rather than absence
                 if not isinstance(data, dict) or "error" in data:
                     continue
-                incidents = _select_nearest_wildfire(
+                incidents = _select_relevant_wildfires(
                     data.get("features", []), lat, lon, wind_dir_deg
                 )
                 if not incidents:
@@ -149,22 +248,24 @@ async def fetch_wfigs_incident(
                         "incident": None,
                         "count": 0,
                         "alignment": None,
+                        "candidates": [],
                         "details": "No active federal wildfire incidents within 300 mi",
                     }
 
-                nearest = incidents[0]
-                alignment = "upwind" if nearest["is_upwind"] else "nearby"
-                size_txt = f"{nearest['size_acres']:,.0f} acres" if nearest["size_acres"] is not None else "size unknown"
-                cont_txt = f"{nearest['percent_contained']:.0f}% contained" if nearest["percent_contained"] is not None else "containment unknown"
+                top = incidents[0]
+                alignment = "upwind" if top["is_upwind"] else "nearby"
+                size_txt = f"{top['size_acres']:,.0f} acres" if top["size_acres"] is not None else "size unknown"
+                cont_txt = f"{top['percent_contained']:.0f}% contained" if top["percent_contained"] is not None else "containment unknown"
                 return {
                     "status": "present",
-                    "incident": nearest,
+                    "incident": top,
                     "count": len(incidents),
                     "alignment": alignment,
+                    "candidates": incidents[:3],
                     "details": (
-                        f"Federal incident registry lists '{nearest['name']}' "
+                        f"Federal incident registry lists '{top['name']}' "
                         f"({size_txt}, {cont_txt}) "
-                        f"{nearest['distance_miles']} mi {nearest['bearing']}"
+                        f"{top['distance_miles']} mi {top['bearing']}"
                     ),
                 }
             except Exception:
@@ -175,5 +276,6 @@ async def fetch_wfigs_incident(
         "incident": None,
         "count": 0,
         "alignment": None,
+        "candidates": [],
         "details": "NIFC WFIGS incident feed unreachable or offline",
     }
