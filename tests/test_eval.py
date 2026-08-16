@@ -102,10 +102,11 @@ def test_corpus_run_shape():
          patch("backend.eval.judge_narrative", new_callable=AsyncMock, return_value=verdict):
         results = asyncio.run(eval_module.run_corpus())
 
-    assert len(results) == 7
+    assert len(results) == 10
     assert {r["scenario"] for r in results} == {
         "wildfire_smoke", "ozone_episode", "windblown_dust",
         "winter_stagnation", "urban_pm", "good_aqi", "openaq_conflict",
+        "hms_smoke_without_firms", "wfigs_incident_only", "rural_unexplained_pm",
     }
     assert all(r["verdict"]["verdict"] == "pass" for r in results)
 
@@ -122,7 +123,7 @@ def test_judge_compare_reports_agreement():
          patch("backend.eval.judge_narrative", side_effect=fake_judge):
         results = asyncio.run(eval_module.run_judge_compare("alt-model"))
 
-    assert len(results) == 7
+    assert len(results) == 10
     assert all(r["default_verdict"]["verdict"] == "fail" for r in results)
     assert all(r["alt_verdict"]["verdict"] == "pass" for r in results)
 
