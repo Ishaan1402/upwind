@@ -3,14 +3,14 @@ from typing import Dict, Any, List, Optional, Tuple
 import httpx
 from backend.config import FIRMS_MAP_KEY
 
-UPWIND_SECTOR_WIDTH_DEG = 90.0  # hotspots within +/-90 deg of the true upwind bearing count as "upwind"
-# Floor at 75 mi so calm winds still catch fires a town/county over (Burns-class misses).
+UPWIND_SECTOR_WIDTH_DEG = 90.0  # Hotspots within +/-90 deg of upwind bearing count as upwind
+# Floor search radius at 75 mi to cover nearby fires under calm winds
 FIRMS_MIN_RADIUS_MILES = 75.0
 FIRMS_MAX_RADIUS_MILES = 150.0
 
 
 def firms_search_radius_miles(wind_speed_mph: Optional[float] = None) -> float:
-    """Search radius for FIRMS bbox — floored so calm conditions still cover nearby fires."""
+    """Search radius for FIRMS bbox - floored so calm conditions still cover nearby fires."""
     return min(FIRMS_MAX_RADIUS_MILES, max(FIRMS_MIN_RADIUS_MILES, (wind_speed_mph or 10.0) * 5.0))
 
 def calculate_haversine_distance(lat1: float, lon1: float, lat2: float, lon2: float) -> Tuple[float, float]:
@@ -55,7 +55,8 @@ def filter_upwind_hotspots(hotspots: List[Dict[str, Any]], wind_dir_deg: Optiona
     """
     if wind_dir_deg is None:
         return hotspots
-    upwind_target_deg = (wind_dir_deg + 180) % 360
+    # Upwind bearing from target is wind_dir_deg itself
+    upwind_target_deg = wind_dir_deg % 360
     return [h for h in hotspots if angular_difference(h["bearing_deg"], upwind_target_deg) <= UPWIND_SECTOR_WIDTH_DEG]
 
 def build_upwind_bbox(lat: float, lon: float, wind_dir_deg: float, radius_miles: float = 100.0) -> Tuple[float, float, float, float]:
@@ -131,12 +132,16 @@ async def fetch_firms_hotspots(
             "details": "NASA FIRMS API key not configured"
         }
 
-    # Floor at 75 mi so calm winds still catch fires a town/county over (Burns-class misses).
+    # Floor search radius at 75 mi to cover nearby fires under calm winds
     radius_miles = firms_search_radius_miles(wind_speed_mph)
     wind_dir = wind_dir_deg if wind_dir_deg is not None else 180.0
     west, south, east, north = build_upwind_bbox(target_lat, target_lon, wind_dir, radius_miles)
 
-    url = f"https://firms.modaps.eosdis.nasa.gov/api/area/csv/{FIRMS_MAP_KEY}/VIIRS_SNPP_NRT/{west},{south},{east},{north}/1"
+    # Query all active VIIRS NRT instruments across a 48 hour window
+    url = (
+        f"https://firms.modaps.eosdis.nasa.gov/api/area/csv/{FIRMS_MAP_KEY}/"
+        f"VIIRS_SNPP_NRT,VIIRS_NOAA20_NRT,VIIRS_NOAA21_NRT/{west},{south},{east},{north}/2"
+    )
 
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
@@ -148,7 +153,17 @@ async def fetch_firms_hotspots(
                     "details": f"FIRMS API HTTP {resp.status_code}"
                 }
 
-            parsed = parse_firms_csv_rows(resp.text)
+            text = resp.text
+            # Treat unexpected response as an outage rather than absence
+            first_line = text.strip().split("\n", 1)[0] if text.strip() else ""
+            if "latitude" not in first_line.lower():
+                return {
+                    "status": "unavailable",
+                    "hotspots": [],
+                    "details": f"FIRMS API error response: {first_line[:80]}"
+                }
+
+            parsed = parse_firms_csv_rows(text)
             if not parsed:
                 return {
                     "status": "absent",
@@ -194,7 +209,8 @@ async def fetch_firms_hotspots(
 
             hotspots.sort(key=lambda x: x["distance_km"])
 
-            upwind_target_deg = (wind_dir_deg + 180) % 360 if wind_dir_deg is not None else None
+            # Tag each hotspot if it falls in the upwind sector
+            upwind_target_deg = wind_dir_deg % 360 if wind_dir_deg is not None else None
             for h in hotspots:
                 h["is_upwind"] = wind_dir_deg is None or angular_difference(h["bearing_deg"], upwind_target_deg) <= UPWIND_SECTOR_WIDTH_DEG
 
@@ -217,7 +233,7 @@ async def fetch_firms_hotspots(
                     )
                 }
 
-            # Nearby but not upwind — still useful regional fire evidence (weaker than upwind).
+            # Nearby non-upwind hotspots
             nearest = hotspots[0]
             return {
                 "status": "present",

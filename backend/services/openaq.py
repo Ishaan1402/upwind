@@ -24,32 +24,31 @@ from backend.config import OPENAQ_API_KEY
 OPENAQ_BASE_URL = "https://api.openaq.org"
 OPENAQ_TIMEOUT_S = 3.0
 
-# Search radius in meters: prefer monitors close enough to be representative,
-# widen to the OpenAQ API maximum only when nothing is found nearby.
+# Search radius in meters
 OPENAQ_PREFERRED_RADIUS_M = 10_000
 OPENAQ_RADIUS_M = 25_000
 
-# Cached data TTLs (seconds).
+# Cache TTLs in seconds
 CACHE_TTL_LOCATION_S = 24 * 3600
 CACHE_TTL_LATEST_S = 15 * 60
 CACHE_TTL_BASELINE_S = 24 * 3600
 
-# Freshness gate: reference monitors report hourly; drop anything older.
+# Hourly monitor readings (3h)
 MAX_READING_AGE_S = 3 * 3600
 
-# Baseline window for "unusual for this location" context.
+# Baseline historical window settings
 BASELINE_DAYS = 365
 SAME_HOUR_WINDOW_DAYS = 30
 SAME_HOUR_MIN_SAMPLES = 5
 
-# Completeness gate for aggregated records (OpenAQ's documented threshold).
+# Completeness threshold for aggregated records
 MIN_PERCENT_COMPLETE = 75.0
 
 CANONICAL_PM_UNIT = "µg/m³"
 CANONICAL_PPB_UNIT = "ppb"
 CANONICAL_CO_UNIT = "ppm"
 
-# OpenAQ owner strings that carry no useful source information.
+# Generic source names to exclude
 _GENERIC_SOURCE_NAMES = {"", "unknown governmental organization"}
 
 _CACHE_BUCKETS: Dict[str, Dict[Any, Tuple[float, Any]]] = {}
@@ -100,11 +99,11 @@ def _parse_utc(dt_str: Optional[str]) -> Optional[datetime]:
 
 def normalize_reading(parameter: str, value: Any, units: Optional[str]) -> Optional[Tuple[float, str]]:
     """
-    Normalize a reading to canonical units.
+    Normalize readings to canonical units.
 
     PM2.5/PM10 -> µg/m³, O3/NO2/SO2 -> ppb, CO -> ppm.
     ppm -> ppb is an exact scaling; µg/m³ gas readings are skipped rather than
-    converted with temperature-dependent assumptions (no guessing).
+    converting by assumption.
     """
     if value is None:
         return None
@@ -344,7 +343,7 @@ async def _fetch_aggregate_series(sensor_id: int, resource: str, datetime_from: 
     filtered = []
     for record in results:
         pct = _percent_complete(record)
-        # Strict gate: only use aggregates with verified completeness.
+        # Filter for aggregates with verified completeness
         if pct is None or pct < MIN_PERCENT_COMPLETE:
             continue
         if record.get("value") is None:
