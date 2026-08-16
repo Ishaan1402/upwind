@@ -15,6 +15,8 @@ OPENAQ_SAME_HOUR_FACTOR = 2.0
 OPENAQ_MEASURED_CONFLICT_FACTOR = 0.5
 # Maximum distance for non-aligned WFIGS fire transport corroboration
 WFIGS_CORROBORATION_RADIUS_MILES = 150.0
+# Surface PM AQI at/above which conditions are Unhealthy or worse (EPA boundary)
+EXTREME_PM_AQI = 150
 # EPA AQI lower-bound concentrations from the AQS breakpoint table
 PM25_AQI_LOWER_BOUNDS = (
     (51, 9.1), (101, 35.5), (151, 55.5), (201, 125.5), (301, 225.5), (401, 325.5)
@@ -309,8 +311,9 @@ def score_hypotheses(
         smoke_score = 85 if hms_high else 70
     elif wfigs_corroborates and wfigs_alignment == "upwind" and pm_elevated:
         # Upwind WFIGS federal incident scoring
-        smoke_conf = "high" if aod_value >= 0.8 else "medium"
-        smoke_score = 80 if aod_value >= 0.8 else 70
+        extreme_pm = aqi_val >= EXTREME_PM_AQI
+        smoke_conf = "high" if (aod_value >= 0.8 or extreme_pm) else "medium"
+        smoke_score = 80 if (aod_value >= 0.8 or extreme_pm) else 70
     elif has_firms_corroboration and pm_elevated:
         # Nearby non-upwind FIRMS hotspot scoring
         smoke_conf = "medium"

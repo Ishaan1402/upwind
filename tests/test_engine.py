@@ -484,6 +484,32 @@ def test_govcamp_wildfire_smoke_top_with_named_incident():
     assert urban_h["score"] < top_h["score"]
 
 
+def test_wenatchee_upwind_wfigs_extreme_pm_high_with_feeds_down():
+    """Wenatchee regression: Very Unhealthy PM with a verified upwind federal
+    fire must reach high confidence even when FIRMS/HMS are down and the CAMS
+    column AOD is only moderate (0.5)."""
+    observation = {"aqi": 249, "primary_pollutant": "PM2.5", "category": "Very Unhealthy"}
+    signals = [
+        {"id": "aerosol_plume", "status": "present", "density": "medium", "aod_value": 0.5},
+        {"id": "hms_smoke", "status": "unavailable", "density": None},
+        {"id": "firms_upwind", "status": "unavailable", "count": 0},
+        {"id": "wfigs_incident", "status": "present", "count": 1, "alignment": "upwind",
+         "incident": {"name": "Pioneer Fire", "size_acres": 8000, "percent_contained": 10,
+                      "state": "WA", "distance_miles": 40.0, "distance_km": 64.4, "bearing": "NW", "is_upwind": True},
+         "details": "Federal incident registry lists 'Pioneer Fire' (8000 acres, 10% contained) 40.0 mi NW"},
+        {"id": "wind", "status": "present", "speed_mph": 5.0, "direction_deg": 315.0},
+        {"id": "surface_pm_level", "status": "present", "primary": True, "pm10_primary": False, "pm25_primary": True, "elevated": True},
+        {"id": "ozone_heat", "status": "absent", "primary": False, "hot_day": False, "temperature_f": 78.0},
+        {"id": "place_context", "status": "unavailable"},
+        {"id": "openaq_concentrations", "status": "unavailable"},
+    ]
+    hypotheses, _ = score_hypotheses(observation, signals)
+    smoke_h = next(h for h in hypotheses if h["id"] == "wildfire_smoke")
+    assert smoke_h["confidence"] == "high"
+    assert smoke_h["score"] == 80
+    assert hypotheses[0]["id"] == "wildfire_smoke"
+
+
 def test_wfigs_metadata_formatting_and_km_fallback():
     """WFIGS support text never renders empty parens when size/containment are
     absent, and the place pointer derives approx_km from miles when km is absent."""

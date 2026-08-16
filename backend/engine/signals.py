@@ -450,7 +450,7 @@ def build_evidence_signals(
     pm10_conc = openaq_sig.get("pm10")
     signals.append({
         "id": "surface_pm_level",
-        "label": "Surface Particulate Matter (PM2.5 / PM10)",
+        "label": "Reported AirNow Index",
         "status": "present" if (pm25_conc is not None or pm10_conc is not None or is_pm_primary) else "absent",
         "primary": is_pm_primary,
         "pm10_primary": is_pm10_primary,

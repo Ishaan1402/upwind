@@ -24,11 +24,11 @@ const DEFAULT_STEPS: InternalToolStep[] = [
   { step: 'weather_vector', label: 'Wind & temperature', status: 'pending', icon: Wind },
   { step: 'aod_density', label: 'Aerosol density (AOD)', status: 'pending', icon: Radio },
   { step: 'hms_scan', label: 'Smoke plume analysis', status: 'pending', icon: CloudFog },
-  { step: 'wfigs_scan', label: 'Fire incident registry', status: 'pending', icon: Flag },
-  { step: 'firms_scan', label: 'Upwind fire hotspots', status: 'pending', icon: Flame },
-  { step: 'web_search', label: 'News & incident search', status: 'pending', icon: Search },
   { step: 'openaq_monitors', label: 'Monitor concentrations', status: 'pending', icon: Gauge },
   { step: 'place_context', label: 'Local population context', status: 'pending', icon: Users },
+  { step: 'web_search', label: 'News & incident search', status: 'pending', icon: Search },
+  { step: 'wfigs_scan', label: 'Fire incident registry', status: 'pending', icon: Flag },
+  { step: 'firms_scan', label: 'Upwind fire hotspots', status: 'pending', icon: Flame },
   { step: 'score_hypotheses', label: 'Scoring hypotheses', status: 'pending', icon: Cpu }
 ];
 
@@ -182,6 +182,17 @@ export const WhyDrawer: React.FC<WhyDrawerProps> = ({
     s.status === 'done' || s.status === 'absent' || s.status === 'warning'
   ).length;
 
+  // Wind-dependent steps (WFIGS / FIRMS) can't start until the wind vector resolves
+  const weatherStep = toolSteps.find(s => s.step === 'weather_vector');
+  const weatherResolved = !!weatherStep && (weatherStep.status === 'done' || weatherStep.status === 'warning');
+  const isWaitingOnWind = (step: InternalToolStep) =>
+    (step.step === 'wfigs_scan' || step.step === 'firms_scan') &&
+    step.status === 'pending' && !weatherResolved;
+
+  // Outages are summarized as a muted footnote; only present/absent chips render
+  const gridSignals = signals.filter(sig => sig.status !== 'unavailable');
+  const unavailableCount = signals.filter(sig => sig.status === 'unavailable').length;
+
   return (
     <div className="drawer-overlay" onClick={onClose}>
       <div
@@ -255,6 +266,7 @@ export const WhyDrawer: React.FC<WhyDrawerProps> = ({
                       const isAbsent = step.status === 'absent';
                       const isWarning = step.status === 'warning';
                       const isResolved = isDone || isAbsent || isWarning;
+                      const waiting = isWaitingOnWind(step);
                       // Stagger step animation delays for cascading effect
                       const cascadeDelay = isTraceCollapsed
                         ? (toolSteps.length - 1 - idx) * 18
@@ -282,6 +294,14 @@ export const WhyDrawer: React.FC<WhyDrawerProps> = ({
 
                           <div className="flex flex-col" style={{ flex: 1 }}>
                             <span className="step-label">{step.label}</span>
+                            {waiting && (
+                              <span className="waiting-on-wind">
+                                waiting on wind
+                                <span className="waiting-dots" aria-hidden="true">
+                                  <span>.</span><span>.</span><span>.</span>
+                                </span>
+                              </span>
+                            )}
                           </div>
 
                           {isResolved && step.duration_ms !== undefined && (
@@ -383,7 +403,7 @@ export const WhyDrawer: React.FC<WhyDrawerProps> = ({
                 <div className="signals-section">
                   <h4 className="section-subtitle">Signals</h4>
                   <div className="signals-grid">
-                    {signals.map((sig) => (
+                    {gridSignals.map((sig) => (
                       <div key={sig.id} className={`signal-chip status-${sig.status}`}>
                         <span className="signal-status-dot" />
                         <span className="signal-name">{sig.label}</span>
@@ -391,6 +411,11 @@ export const WhyDrawer: React.FC<WhyDrawerProps> = ({
                       </div>
                     ))}
                   </div>
+                  {unavailableCount > 0 && (
+                    <p className="signals-unavailable-note">
+                      {unavailableCount} data source{unavailableCount === 1 ? '' : 's'} unavailable
+                    </p>
+                  )}
                 </div>
               )}
             </div>
