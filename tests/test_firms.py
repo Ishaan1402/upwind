@@ -45,12 +45,14 @@ def test_angular_difference():
 
 def test_filter_upwind_hotspots_excludes_downwind():
     # wind_dir_deg = 0 means wind comes FROM 0° (North), blowing South.
-    # Therefore upwind bearing is (0 + 180) % 360 = 180° (North of user).
+    # The upwind bearing from the target is therefore 0° (where smoke sources
+    # sit): hotspots within +/-90° of 0° (i.e. 270-90°) are upwind; those near
+    # 180° are downwind.
     hotspots = [
-        {"id": 1, "bearing_deg": 170.0},  # Upwind (diff 10 deg from 180)
-        {"id": 2, "bearing_deg": 100.0},  # Upwind (diff 80 deg from 180)
-        {"id": 3, "bearing_deg": 260.0},  # Upwind (diff 80 deg from 180)
-        {"id": 4, "bearing_deg": 10.0},   # Downwind (diff 170 deg from 180)
+        {"id": 1, "bearing_deg": 350.0},  # Upwind (diff 10 deg from 0)
+        {"id": 2, "bearing_deg": 10.0},   # Upwind (diff 10 deg from 0)
+        {"id": 3, "bearing_deg": 100.0},  # Downwind side (diff 100 deg from 0)
+        {"id": 4, "bearing_deg": 170.0},  # Downwind (diff 170 deg from 0)
     ]
     
     upwind = filter_upwind_hotspots(hotspots, wind_dir_deg=0.0)
@@ -58,8 +60,23 @@ def test_filter_upwind_hotspots_excludes_downwind():
     
     assert 1 in upwind_ids
     assert 2 in upwind_ids
-    assert 3 in upwind_ids
+    assert 3 not in upwind_ids
     assert 4 not in upwind_ids
+
+def test_filter_upwind_hotspots_east_wind_matches_eastern_fire():
+    # Wind FROM the east (90°) carries smoke westward onto the target, so a
+    # fire due east of the target (bearing 90°) is upwind and one due west
+    # (bearing 270°) is downwind.
+    hotspots = [
+        {"id": 1, "bearing_deg": 90.0},   # Due east -> upwind
+        {"id": 2, "bearing_deg": 100.0},  # Still within the upwind sector
+        {"id": 3, "bearing_deg": 260.0},  # Due-west side -> downwind
+    ]
+    upwind = filter_upwind_hotspots(hotspots, wind_dir_deg=90.0)
+    upwind_ids = [h["id"] for h in upwind]
+    assert 1 in upwind_ids
+    assert 2 in upwind_ids
+    assert 3 not in upwind_ids
 
 def test_filter_upwind_hotspots_no_wind_returns_all():
     hotspots = [
@@ -88,6 +105,43 @@ def test_parse_firms_csv_rows_empty_and_header_only():
     assert parse_firms_csv_rows("") == []
     assert parse_firms_csv_rows("latitude,longitude\n") == []
 
+def test_fetch_firms_error_body_is_unavailable_not_absent():
+    """FIRMS returns HTTP 200 with a plain-text error for bad keys / rate limits;
+    that must be 'unavailable', never 'absent' (verified absence)."""
+    mock_response = AsyncMock()
+    mock_response.status_code = 200
+    mock_response.text = "Invalid MAP_KEY"
+
+    mock_client = AsyncMock()
+    mock_client.get.return_value = mock_response
+    mock_client.__aenter__.return_value = mock_client
+    mock_client.__aexit__.return_value = None
+
+    with patch("backend.services.firms.FIRMS_MAP_KEY", "bad-key"), \
+         patch("backend.services.firms.httpx.AsyncClient", return_value=mock_client):
+        result = asyncio.run(fetch_firms_hotspots(43.586, -119.054))
+
+    assert result["status"] == "unavailable"
+    assert "Invalid MAP_KEY" in result["details"]
+
+def test_fetch_firms_header_only_is_absent():
+    """A well-formed CSV with a header but zero rows is a genuine absence."""
+    mock_response = AsyncMock()
+    mock_response.status_code = 200
+    mock_response.text = "latitude,longitude,bright_ti4,scan,track,acq_date,acq_time,satellite,instrument,confidence,version,bright_ti5,frp,daynight\n"
+
+    mock_client = AsyncMock()
+    mock_client.get.return_value = mock_response
+    mock_client.__aenter__.return_value = mock_client
+    mock_client.__aexit__.return_value = None
+
+    with patch("backend.services.firms.FIRMS_MAP_KEY", "test-key"), \
+         patch("backend.services.firms.httpx.AsyncClient", return_value=mock_client):
+        result = asyncio.run(fetch_firms_hotspots(43.586, -119.054))
+
+    assert result["status"] == "absent"
+
+
 def test_fetch_firms_hotspots_parses_viirs_csv_response():
     mock_response = AsyncMock()
     mock_response.status_code = 200
@@ -107,3 +161,8 @@ def test_fetch_firms_hotspots_parses_viirs_csv_response():
     assert result["count"] >= 1
     assert result["nearest"] is not None
     assert result["nearest"]["frp"] > 0
+
+    # Query must cover all three active VIIRS NRT satellites with a 48h window.
+    requested_url = mock_client.get.call_args.args[0]
+    assert "VIIRS_SNPP_NRT,VIIRS_NOAA20_NRT,VIIRS_NOAA21_NRT" in requested_url
+    assert requested_url.rstrip("/").endswith("/2")
