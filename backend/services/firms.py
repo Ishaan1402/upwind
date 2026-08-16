@@ -1,3 +1,4 @@
+import asyncio
 import math
 from datetime import datetime, timezone
 from typing import Dict, Any, List, Optional, Tuple
@@ -20,6 +21,12 @@ from backend.engine.params import (
     FIRMS_UPWIND_BONUS,
     UPWIND_SECTOR_WIDTH_DEG,
 )
+
+# Active VIIRS NRT instruments. FIRMS's area/csv endpoint does NOT accept a
+# comma-joined source list (it returns HTTP 400 "Invalid source"), so each
+# instrument is queried with its own single-source request and the CSV payloads
+# are merged (see fetch_firms_hotspots).
+FIRMS_SOURCES = ("VIIRS_SNPP_NRT", "VIIRS_NOAA20_NRT", "VIIRS_NOAA21_NRT")
 
 
 def firms_search_radius_miles(wind_speed_mph: Optional[float] = None) -> float:
@@ -205,26 +212,71 @@ def cluster_firms_hotspots(
     relevance (desc) after dropping clusters whose summed FRP falls below
     FIRMS_MIN_CLUSTER_FRP.
     """
+    if not hotspots:
+        return []
+
     ordered = sorted(hotspots, key=lambda h: h["frp"], reverse=True)
     member_groups: List[List[Dict[str, Any]]] = []
     centroids: List[Tuple[float, float]] = []
 
+    # Spatial grid so the neighbor search is ~O(1) instead of O(hotspots x
+    # clusters): every cluster is keyed by its CURRENT centroid's cell, and a
+    # hotspot only tests the 3x3 cell neighborhood around its own cell. Cell size
+    # is 2x the merge radius (times a 1.1 margin) in degrees, so any cluster
+    # centroid within cluster_radius_km of a hotspot is guaranteed to sit inside
+    # that 3x3 window (worst case the hotspot and centroid sit at opposite
+    # corners of diagonally adjacent cells, i.e. < 2x cell size = 2.2x radius
+    # apart). Because the grid is re-keyed whenever the running-mean centroid
+    # drifts into a new cell, the guarantee tracks the live centroid position.
+    cell_size_km = 2.0 * cluster_radius_km * 1.1
+    lat_cell = cell_size_km / 111.0
+    # lon deg/km shrinks with |lat|; size lon cells from the extreme (highest
+    # |lat|) hotspot so coverage holds at every latitude in the dataset.
+    ref_lat = min(max(abs(h["lat"]) for h in hotspots), 89.0)
+    lon_cell = cell_size_km / (111.0 * math.cos(math.radians(ref_lat)))
+    grid: Dict[Tuple[int, int], List[int]] = {}
+
+    def _cell_of(lat: float, lon: float) -> Tuple[int, int]:
+        return (int(math.floor(lat / lat_cell)), int(math.floor(lon / lon_cell)))
+
     for h in ordered:
+        h_lat = h["lat"]
+        h_lon = h["lon"]
+        cell = _cell_of(h_lat, h_lon)
         joined = False
-        for idx, (members, (clat, clon)) in enumerate(zip(member_groups, centroids)):
-            dist_km, _ = calculate_haversine_distance(clat, clon, h["lat"], h["lon"])
+        # Candidate cluster indices from the 3x3 neighborhood, tested in
+        # creation order so the FIRST within radius still wins (identical to a
+        # full linear scan: any in-range cluster is provably in this window).
+        candidates: List[int] = []
+        for di in (-1, 0, 1):
+            for dj in (-1, 0, 1):
+                bucket = grid.get((cell[0] + di, cell[1] + dj))
+                if bucket:
+                    candidates.extend(bucket)
+        candidates.sort()
+        for idx in candidates:
+            clat, clon = centroids[idx]
+            dist_km, _ = calculate_haversine_distance(clat, clon, h_lat, h_lon)
             if dist_km <= cluster_radius_km:
-                members.append(h)
-                n = len(members)
-                centroids[idx] = (
-                    (clat * (n - 1) + h["lat"]) / n,
-                    (clon * (n - 1) + h["lon"]) / n,
+                member_groups[idx].append(h)
+                n = len(member_groups[idx])
+                new_centroid = (
+                    (clat * (n - 1) + h_lat) / n,
+                    (clon * (n - 1) + h_lon) / n,
                 )
+                centroids[idx] = new_centroid
+                # Re-key the grid if the running-mean centroid drifted cells.
+                new_cell = _cell_of(new_centroid[0], new_centroid[1])
+                old_cell = _cell_of(clat, clon)
+                if new_cell != old_cell:
+                    grid[old_cell].remove(idx)
+                    grid.setdefault(new_cell, []).append(idx)
                 joined = True
                 break
         if not joined:
             member_groups.append([h])
-            centroids.append((h["lat"], h["lon"]))
+            centroids.append((h_lat, h_lon))
+            grid.setdefault(cell, []).append(len(centroids) - 1)
 
     clusters = []
     for members in member_groups:
@@ -300,23 +352,48 @@ async def fetch_firms_hotspots(
     wind_dir = wind_dir_deg if wind_dir_deg is not None else 180.0
     west, south, east, north = build_upwind_bbox(target_lat, target_lon, wind_dir, radius_miles)
 
-    # Query all active VIIRS NRT instruments across a 48 hour window
-    url = (
-        f"https://firms.modaps.eosdis.nasa.gov/api/area/csv/{FIRMS_MAP_KEY}/"
-        f"VIIRS_SNPP_NRT,VIIRS_NOAA20_NRT,VIIRS_NOAA21_NRT/{west},{south},{east},{north}/2"
-    )
-
+    # Query all active VIIRS NRT instruments across a 48 hour window. FIRMS
+    # rejects comma-joined source lists, so issue ONE request per source
+    # (concurrently) and merge the per-source CSV payloads below.
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.get(url)
-            if resp.status_code != 200:
+            async def _get_source(source: str) -> Optional[str]:
+                url = (
+                    f"https://firms.modaps.eosdis.nasa.gov/api/area/csv/{FIRMS_MAP_KEY}/"
+                    f"{source}/{west},{south},{east},{north}/2"
+                )
+                try:
+                    resp = await client.get(url)
+                    if resp.status_code != 200:
+                        return None
+                    return resp.text
+                except Exception:
+                    return None
+
+            results = await asyncio.gather(
+                *(_get_source(src) for src in FIRMS_SOURCES),
+                return_exceptions=True,
+            )
+            texts = [t for t in results if isinstance(t, str)]
+            if not texts:
                 return {
                     "status": "unavailable",
                     "hotspots": [],
-                    "details": f"FIRMS API HTTP {resp.status_code}"
+                    "details": "FIRMS all sources failed (HTTP errors)"
                 }
 
-            text = resp.text
+            # Merge the successful per-source payloads, keeping each source's
+            # header line only once.
+            merged_lines: List[str] = []
+            for text in texts:
+                lines = text.strip().split("\n")
+                if not lines or not lines[0].strip():
+                    continue
+                if merged_lines:
+                    lines = lines[1:]
+                merged_lines.extend(lines)
+            text = "\n".join(merged_lines)
+
             # Treat unexpected response as an outage rather than absence
             first_line = text.strip().split("\n", 1)[0] if text.strip() else ""
             if "latitude" not in first_line.lower():

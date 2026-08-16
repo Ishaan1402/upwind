@@ -1,3 +1,6 @@
+import math
+import random
+
 import pytest
 import asyncio
 from datetime import datetime, timezone
@@ -9,6 +12,8 @@ from backend.services.firms import (
     filter_upwind_hotspots,
     firms_search_radius_miles,
     cluster_firms_hotspots,
+    FIRMS_CLUSTER_RADIUS_KM,
+    FIRMS_MIN_CLUSTER_FRP,
     FIRMS_MIN_RADIUS_MILES,
     parse_firms_csv_rows,
     fetch_firms_hotspots,
@@ -26,20 +31,41 @@ FIRMS_CSV_HEADER = "latitude,longitude,bright_ti4,scan,track,acq_date,acq_time,s
 REFERENCE_UTC = datetime(2026, 7, 27, 9, 40, tzinfo=timezone.utc)
 
 
-def _mock_fetch(csv_text: str, **fetch_kwargs):
-    """Run fetch_firms_hotspots against a canned FIRMS CSV response."""
-    mock_response = AsyncMock()
-    mock_response.status_code = 200
-    mock_response.text = csv_text
+def _source_from_url(url: str) -> str:
+    """Extract the FIRMS source name from a ``/area/csv/{key}/{source}/...`` URL."""
+    return url.split("csv/")[1].split("/")[1]
+
+
+def _mock_fetch(csv_by_source, **fetch_kwargs):
+    """Run fetch_firms_hotspots against canned per-source FIRMS CSV responses.
+
+    ``csv_by_source`` maps FIRMS source name -> CSV text; a bare string is
+    served for the first source (VIIRS_SNPP_NRT) only. Sources without an entry
+    respond with a header-only CSV (zero rows). Returns ``(result, requested)``
+    where ``requested`` is the list of URLs fetched.
+    """
+    if isinstance(csv_by_source, str):
+        csv_by_source = {"VIIRS_SNPP_NRT": csv_by_source}
+    requested: list = []
+
+    def _handler(url):
+        requested.append(str(url))
+        mock_response = AsyncMock()
+        mock_response.status_code = 200
+        mock_response.text = csv_by_source.get(
+            _source_from_url(url), FIRMS_CSV_HEADER + "\n"
+        )
+        return mock_response
 
     mock_client = AsyncMock()
-    mock_client.get.return_value = mock_response
+    mock_client.get.side_effect = _handler
     mock_client.__aenter__.return_value = mock_client
     mock_client.__aexit__.return_value = None
 
     with patch("backend.services.firms.FIRMS_MAP_KEY", "test-key"), \
          patch("backend.services.firms.httpx.AsyncClient", return_value=mock_client):
-        return asyncio.run(fetch_firms_hotspots(**fetch_kwargs))
+        result = asyncio.run(fetch_firms_hotspots(**fetch_kwargs))
+    return result, requested
 
 
 def test_calculate_bearing_degrees_cardinal():
@@ -189,12 +215,20 @@ def test_fetch_firms_header_only_is_absent():
 
 
 def test_fetch_firms_hotspots_parses_viirs_csv_response():
-    mock_response = AsyncMock()
-    mock_response.status_code = 200
-    mock_response.text = FIRMS_VIIRS_CSV_SAMPLE
+    requested_urls = []
+
+    def _handler(url):
+        requested_urls.append(str(url))
+        mock_response = AsyncMock()
+        mock_response.status_code = 200
+        mock_response.text = (
+            FIRMS_VIIRS_CSV_SAMPLE if "/VIIRS_SNPP_NRT/" in url
+            else FIRMS_CSV_HEADER + "\n"
+        )
+        return mock_response
 
     mock_client = AsyncMock()
-    mock_client.get.return_value = mock_response
+    mock_client.get.side_effect = _handler
     mock_client.__aenter__.return_value = mock_client
     mock_client.__aexit__.return_value = None
 
@@ -236,10 +270,15 @@ def test_fetch_firms_hotspots_parses_viirs_csv_response():
     assert all(k in result["hotspots"][0] for k in
                ("lat", "lon", "frp", "distance_miles", "bearing", "bearing_deg", "is_upwind", "age_hours", "confidence"))
 
-    # Query must cover all three active VIIRS NRT satellites with a 48h window.
-    requested_url = mock_client.get.call_args.args[0]
-    assert "VIIRS_SNPP_NRT,VIIRS_NOAA20_NRT,VIIRS_NOAA21_NRT" in requested_url
-    assert requested_url.rstrip("/").endswith("/2")
+    # One request per active VIIRS NRT instrument, each a single-source URL
+    # with a 48h window (never a comma-joined source list, which FIRMS rejects).
+    assert len(requested_urls) == 3
+    assert {_source_from_url(u) for u in requested_urls} == {
+        "VIIRS_SNPP_NRT", "VIIRS_NOAA20_NRT", "VIIRS_NOAA21_NRT",
+    }
+    for url in requested_urls:
+        assert "," not in _source_from_url(url)
+        assert url.rstrip("/").endswith("/2")
 
 
 def test_fetch_firms_relevance_ranks_high_frp_far_over_zero_frp_near():
@@ -251,7 +290,7 @@ def test_fetch_firms_relevance_ranks_high_frp_far_over_zero_frp_near():
         "43.586,-119.20,297.1,0.6,0.4,2026-07-27,940,N,VIIRS,n,2.0URT,287.1,0,N\n"
         "43.586,-119.60,301.0,0.6,0.4,2026-07-27,941,N,VIIRS,n,2.0URT,291.0,60,N\n"
     )
-    result = _mock_fetch(csv, target_lat=43.586, target_lon=-119.054,
+    result, _ = _mock_fetch(csv, target_lat=43.586, target_lon=-119.054,
                          wind_dir_deg=270.0, wind_speed_mph=3.0, reference_utc=REFERENCE_UTC)
 
     assert result["status"] == "present"
@@ -276,7 +315,7 @@ def test_fetch_firms_recency_downweights_stale_detections_and_drops_over_window(
         "43.586,-119.60,301.0,0.6,0.4,2026-07-27,940,N,VIIRS,n,2.0URT,291.0,60,N\n"   # fresh
         "43.600,-119.90,301.0,0.6,0.4,2026-07-25,0730,N,VIIRS,n,2.0URT,291.0,60,N\n"  # 50h old -> dropped
     )
-    result = _mock_fetch(csv, target_lat=43.586, target_lon=-119.054,
+    result, _ = _mock_fetch(csv, target_lat=43.586, target_lon=-119.054,
                          wind_dir_deg=270.0, wind_speed_mph=3.0, reference_utc=REFERENCE_UTC)
 
     assert result["status"] == "present"
@@ -300,7 +339,7 @@ def test_fetch_firms_drops_low_confidence_detections():
         "43.586,-119.60,301.0,0.6,0.4,2026-07-27,940,N,VIIRS,high,2.0URT,291.0,5,N\n"
         "43.586,-119.80,301.0,0.6,0.4,2026-07-27,940,N,VIIRS,nominal,2.0URT,291.0,3,N\n"
     )
-    result = _mock_fetch(csv, target_lat=43.586, target_lon=-119.054,
+    result, _ = _mock_fetch(csv, target_lat=43.586, target_lon=-119.054,
                          wind_dir_deg=270.0, wind_speed_mph=3.0, reference_utc=REFERENCE_UTC)
 
     assert result["status"] == "present"
@@ -325,7 +364,7 @@ def test_fetch_firms_clusters_merge_pixels_with_summed_frp():
         "43.586,-119.102,297.1,0.6,0.4,2026-07-27,941,N,VIIRS,n,2.0URT,287.1,3,N\n"
         "43.586,-119.30,297.1,0.6,0.4,2026-07-27,942,N,VIIRS,n,2.0URT,287.1,0,N\n"
     )
-    result = _mock_fetch(csv, target_lat=43.586, target_lon=-119.054,
+    result, _ = _mock_fetch(csv, target_lat=43.586, target_lon=-119.054,
                          wind_dir_deg=270.0, wind_speed_mph=3.0, reference_utc=REFERENCE_UTC)
 
     assert result["status"] == "present"
@@ -352,7 +391,7 @@ def test_fetch_firms_wenatchee_high_frp_cluster_outranks_tiny_near_cluster():
         "43.586,-119.09,297.1,0.6,0.4,2026-07-27,940,N,VIIRS,n,2.0URT,287.1,2,N\n"
         "43.586,-119.60,301.0,0.6,0.4,2026-07-27,940,N,VIIRS,n,2.0URT,291.0,60,N\n"
     )
-    result = _mock_fetch(csv, target_lat=43.586, target_lon=-119.054,
+    result, _ = _mock_fetch(csv, target_lat=43.586, target_lon=-119.054,
                          wind_dir_deg=270.0, wind_speed_mph=3.0, reference_utc=REFERENCE_UTC)
 
     assert result["status"] == "present"
@@ -369,7 +408,7 @@ def test_fetch_firms_wenatchee_high_frp_cluster_outranks_tiny_near_cluster():
 def test_fetch_firms_missing_acq_columns_treats_as_fresh():
     """Schema shifts that drop acq_date/acq_time degrade gracefully: age 0.0."""
     csv = "latitude,longitude,frp\n43.586,-119.20,5\n"
-    result = _mock_fetch(csv, target_lat=43.586, target_lon=-119.054,
+    result, _ = _mock_fetch(csv, target_lat=43.586, target_lon=-119.054,
                          wind_dir_deg=270.0, wind_speed_mph=3.0, reference_utc=REFERENCE_UTC)
     assert result["status"] == "present"
     assert result["hotspots"][0]["age_hours"] == 0.0
@@ -385,7 +424,7 @@ def test_fetch_firms_high_confidence_outranks_nominal():
         "43.586,-119.20,297.1,0.6,0.4,2026-07-27,940,N,VIIRS,nominal,2.0URT,287.1,10,N\n"
         "43.586,-119.25,297.1,0.6,0.4,2026-07-27,940,N,VIIRS,high,2.0URT,287.1,10,N\n"
     )
-    result = _mock_fetch(csv, target_lat=43.586, target_lon=-119.054,
+    result, _ = _mock_fetch(csv, target_lat=43.586, target_lon=-119.054,
                          wind_dir_deg=270.0, wind_speed_mph=3.0, reference_utc=REFERENCE_UTC)
 
     assert result["status"] == "present"
@@ -407,7 +446,7 @@ def test_fetch_firms_nearest_is_upwind_when_stronger_downwind_exists():
         "43.586,-119.20,297.1,0.6,0.4,2026-07-27,940,N,VIIRS,n,2.0URT,287.1,3,N\n"    # upwind, weak
         "43.586,-119.03,301.0,0.6,0.4,2026-07-27,940,N,VIIRS,n,2.0URT,291.0,60,N\n"   # downwind, strong
     )
-    result = _mock_fetch(csv, target_lat=43.586, target_lon=-119.054,
+    result, _ = _mock_fetch(csv, target_lat=43.586, target_lon=-119.054,
                          wind_dir_deg=270.0, wind_speed_mph=3.0, reference_utc=REFERENCE_UTC)
 
     assert result["status"] == "present"
@@ -477,3 +516,184 @@ def test_cluster_firms_persistence_capped():
     uncapped = round(2.0 * 0.7 * 1.8 * 4.0 * (1.0 / (dist_mi + 1.0)) * 1.0, 1)
     assert cluster["relevance"] == capped
     assert capped != uncapped  # the cap genuinely binds at 5 detections
+
+
+def test_fetch_firms_merges_hotspots_from_multiple_sources():
+    """Hotspots from different NRT instruments are merged into one result, and
+    each instrument is queried with its own single-source URL (FIRMS rejects
+    comma-joined source lists with HTTP 400)."""
+    noaa20_csv = (
+        f"{FIRMS_CSV_HEADER}\n"
+        "43.60,-119.10,299.0,0.6,0.4,2026-07-27,945,N,VIIRS,h,2.0URT,289.0,8.0,N\n"
+    )
+    result, requested = _mock_fetch(
+        {"VIIRS_SNPP_NRT": FIRMS_VIIRS_CSV_SAMPLE, "VIIRS_NOAA20_NRT": noaa20_csv},
+        target_lat=43.586, target_lon=-119.054,
+        wind_dir_deg=270.0, wind_speed_mph=3.0, reference_utc=REFERENCE_UTC,
+    )
+
+    # Three single-source requests, never a comma-joined source list.
+    assert len(requested) == 3
+    assert {_source_from_url(u) for u in requested} == {
+        "VIIRS_SNPP_NRT", "VIIRS_NOAA20_NRT", "VIIRS_NOAA21_NRT",
+    }
+    for url in requested:
+        assert "," not in _source_from_url(url)
+        assert url.rstrip("/").endswith("/2")
+
+    # SNPP's two rows plus NOAA-20's one row are merged into one result.
+    assert result["status"] == "present"
+    lons = {round(h["lon"], 4) for h in result["hotspots"]}
+    assert -119.1263 in lons  # SNPP row
+    assert -119.1 in lons     # NOAA-20 row
+    assert result["total_count"] == 3
+
+
+def test_fetch_firms_partial_source_failure_keeps_healthy_sources():
+    """A source that 400s must not poison the whole response: the healthy
+    source's hotspots are still returned (never 'unavailable')."""
+    requested_urls = []
+
+    def _handler(url):
+        requested_urls.append(str(url))
+        mock_response = AsyncMock()
+        if "/VIIRS_SNPP_NRT/" in url:
+            mock_response.status_code = 400
+            mock_response.text = "Invalid source"
+        elif "/VIIRS_NOAA20_NRT/" in url:
+            mock_response.status_code = 200
+            mock_response.text = FIRMS_VIIRS_CSV_SAMPLE
+        else:
+            mock_response.status_code = 200
+            mock_response.text = FIRMS_CSV_HEADER + "\n"
+        return mock_response
+
+    mock_client = AsyncMock()
+    mock_client.get.side_effect = _handler
+    mock_client.__aenter__.return_value = mock_client
+    mock_client.__aexit__.return_value = None
+
+    with patch("backend.services.firms.FIRMS_MAP_KEY", "test-key"), \
+         patch("backend.services.firms.httpx.AsyncClient", return_value=mock_client):
+        result = asyncio.run(fetch_firms_hotspots(
+            43.586, -119.054, wind_dir_deg=270.0, wind_speed_mph=3.0, reference_utc=REFERENCE_UTC
+        ))
+
+    assert len(requested_urls) == 3
+    assert result["status"] == "present"
+    assert result["total_count"] == 2  # NOAA-20's rows survive
+    assert len(result["hotspots"]) == 2
+
+
+def test_fetch_firms_all_sources_failed_is_unavailable():
+    """Every instrument returning an HTTP error is an outage ('unavailable'),
+    never verified absence."""
+    mock_response = AsyncMock()
+    mock_response.status_code = 400
+    mock_response.text = "Invalid source"
+
+    mock_client = AsyncMock()
+    mock_client.get.return_value = mock_response
+    mock_client.__aenter__.return_value = mock_client
+    mock_client.__aexit__.return_value = None
+
+    with patch("backend.services.firms.FIRMS_MAP_KEY", "test-key"), \
+         patch("backend.services.firms.httpx.AsyncClient", return_value=mock_client):
+        result = asyncio.run(fetch_firms_hotspots(43.586, -119.054))
+
+    assert result["status"] == "unavailable"
+    assert result["hotspots"] == []
+    assert "all sources failed" in result["details"]
+
+
+def _synthetic_hotspot(lat: float, lon: float, frp: float) -> dict:
+    """Minimal pixel record in the shape fetch_firms_hotspots hands to clustering."""
+    return {
+        "lat": lat,
+        "lon": lon,
+        "frp": frp,
+        "age_hours": 0.0,
+        "is_upwind": True,
+        "confidence": "nominal",
+        "confidence_weight": 0.7,
+        "distance_km": 0.0,
+        "distance_miles": 0.0,
+        "bearing": "N",
+        "bearing_deg": 0.0,
+        "relevance": 0.0,
+    }
+
+
+def _naive_cluster_signature(hotspots, cluster_radius_km=FIRMS_CLUSTER_RADIUS_KM):
+    """O(hotspots x clusters) reference: replicate the pre-grid greedy centroid
+    clustering exactly and return the surviving clusters' signature as
+    (ordered member (lat, lon) tuples, summed FRP rounded like the output, detections)."""
+    ordered = sorted(hotspots, key=lambda h: h["frp"], reverse=True)
+    member_groups = []
+    centroids = []
+    for h in ordered:
+        joined = False
+        for idx, (members, (clat, clon)) in enumerate(zip(member_groups, centroids)):
+            dist_km, _ = calculate_haversine_distance(clat, clon, h["lat"], h["lon"])
+            if dist_km <= cluster_radius_km:
+                members.append(h)
+                n = len(members)
+                centroids[idx] = (
+                    (clat * (n - 1) + h["lat"]) / n,
+                    (clon * (n - 1) + h["lon"]) / n,
+                )
+                joined = True
+                break
+        if not joined:
+            member_groups.append([h])
+            centroids.append((h["lat"], h["lon"]))
+
+    return [
+        (tuple((m["lat"], m["lon"]) for m in g), round(sum(m["frp"] for m in g), 1), len(g))
+        for g in member_groups
+        if sum(m["frp"] for m in g) >= FIRMS_MIN_CLUSTER_FRP
+    ]
+
+
+def _grid_cluster_signature(clusters):
+    return [
+        (tuple((p["lat"], p["lon"]) for p in c["pixels"]), c["frp"], c["detections"])
+        for c in clusters
+    ]
+
+
+def test_cluster_firms_grid_matches_naive_on_dense_synthetic_cloud():
+    """Determinism/perf smoke test: a dense 300-hotspot patch (3 km across) plus
+    300 scattered hotspots must cluster identically to the naive O(n x k)
+    reference -- same cluster count, same summed FRP, same membership and
+    member order -- and the grid result must be deterministic across calls.
+    This exercises centroid drift across grid cells inside the dense patch."""
+    rng = random.Random(42)
+    patch_lat, patch_lon = 38.5, -122.5
+    lat_deg = 3.0 / 111.0
+    lon_deg = 3.0 / (111.0 * math.cos(math.radians(patch_lat)))
+    hotspots = []
+    for _ in range(300):
+        hotspots.append(_synthetic_hotspot(
+            patch_lat + rng.uniform(-lat_deg, lat_deg),
+            patch_lon + rng.uniform(-lon_deg, lon_deg),
+            rng.uniform(0.5, 60.0),
+        ))
+    for _ in range(300):
+        hotspots.append(_synthetic_hotspot(
+            38.0 + rng.uniform(-2.0, 2.0),
+            -122.5 + rng.uniform(-2.0, 2.0),
+            rng.uniform(0.1, 40.0),
+        ))
+
+    result = cluster_firms_hotspots(hotspots, 38.5, -122.5)
+    # Deterministic: a second call returns a byte-identical payload.
+    assert result == cluster_firms_hotspots(hotspots, 38.5, -122.5)
+
+    naive_sig = _naive_cluster_signature(hotspots)
+    # The grid result is relevance-sorted while the naive signature preserves
+    # creation order, so compare canonical (sorted) multisets: identical clusters.
+    assert sorted(_grid_cluster_signature(result)) == sorted(naive_sig)
+    assert len(result) == len(naive_sig)
+    assert sum(c["frp"] for c in result) == sum(frp for _, frp, _ in naive_sig)
+
