@@ -107,6 +107,20 @@ def test_fetch_place_context_strips_zip_plus_four():
     set_cache.assert_called_once_with("pop:97028", res)
 
 
+def test_fetch_place_context_uses_dhc_endpoint():
+    """ZCTA population must come from dec/dhc (dec/pl rejects the geography)."""
+    payload = [["NAME", "P1_001N", "zip code tabulation area"], ["ZCTA5 98801", "44970", "98801"]]
+    mock_client = _mock_client(payload)
+    with patch.object(place_context, "CENSUS_API_KEY", "test-key"), \
+         patch.object(place_context, "get_cached_place", return_value=None), \
+         patch.object(place_context, "set_cached_place"), \
+         patch("backend.services.place_context.httpx.AsyncClient", return_value=mock_client):
+        asyncio.run(fetch_place_context("98801"))
+
+    url = mock_client.get.call_args.args[0]
+    assert "/2020/dec/dhc" in url
+
+
 def test_fetch_place_context_no_zip_is_unavailable():
     with patch("backend.services.place_context.httpx.AsyncClient") as client_cls:
         res = asyncio.run(fetch_place_context(None))

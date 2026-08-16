@@ -4,8 +4,11 @@ import httpx
 from backend.config import CENSUS_API_KEY
 from backend.db import get_cached_place, set_cached_place
 
-# 2020 Decennial Census P1 total population by ZCTA
-CENSUS_URL = "https://api.census.gov/data/2020/dec/pl"
+# 2020 Decennial Census DHC P1 total population by ZCTA.
+# NOTE: the PL 94-171 endpoint (dec/pl) does NOT support "zip code tabulation
+# area" geography (400 "unknown/unsupported geography hierarchy"); ZCTA is only
+# available via dec/dhc (or acs5, which uses a different variable name).
+CENSUS_URL = "https://api.census.gov/data/2020/dec/dhc"
 
 RURAL_POPULATION_CAP = 5000
 PLACE_CACHE_TTL_DAYS = 365
