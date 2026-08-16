@@ -20,6 +20,7 @@ htmlcov/
 backend/cache.db
 upwind.db
 *.db-journal
+backend/eval/accuracy/data/
 
 # Frontend build & deps (also covered under frontend/.gitignore)
 frontend/node_modules/
@@ -42,5 +43,3 @@ Thumbs.db
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
-
-docs/decisions/
