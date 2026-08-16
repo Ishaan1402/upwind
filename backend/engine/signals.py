@@ -359,7 +359,8 @@ def build_evidence_signals(
     is_pm_primary = "PM" in primary_pollutant
     is_pm10_primary = "PM10" in primary_pollutant
     is_pm25_primary = is_pm_primary and not is_pm10_primary
-    is_pm_elevated = aqi_val > AQI_ELEVATED and is_pm_primary
+    # None-safe: a missing AQI is unknown, never elevated.
+    is_pm_elevated = aqi_val is not None and aqi_val > AQI_ELEVATED and is_pm_primary
 
     wind_speed = weather.get("wind_speed_mph") if weather else None
     wind_dir = weather.get("wind_direction_deg") if weather else None

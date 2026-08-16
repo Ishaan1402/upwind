@@ -86,7 +86,10 @@ def score_hypotheses(
 
     pm_primary = pm.get("primary", False)
     pm10_primary = pm.get("pm10_primary", False) or ("PM10" in primary)
-    pm_elevated = pm.get("elevated", False) or (aqi_val > AQI_ELEVATED and pm_primary)
+    # None-safe: a missing AQI is unknown, never elevated.
+    pm_elevated = pm.get("elevated", False) or (
+        aqi_val is not None and aqi_val > AQI_ELEVATED and pm_primary
+    )
 
     temp_f = o3.get("temperature_f")
     is_calm = wind_speed is not None and wind_speed < CALM_WIND_SPEED_MPH
@@ -187,7 +190,9 @@ def score_hypotheses(
     haze_no_fire = (aod_value >= AOD_MEDIUM) and not has_smoke_corroboration
     # Light haze with extreme PM indicates possible regional smoke settling
     light_haze_extreme_pm = (
-        has_haze and aod_value < AOD_MEDIUM and aqi_val >= EXTREME_PM_AQI and pm_elevated and not has_smoke_corroboration
+        has_haze and aod_value < AOD_MEDIUM
+        and aqi_val is not None and aqi_val >= EXTREME_PM_AQI
+        and pm_elevated and not has_smoke_corroboration
     )
 
     # Count verified positive fire evidence indicators
@@ -417,7 +422,7 @@ def score_hypotheses(
     elif o3_primary:
         o3_conf = "medium"
         o3_score = 60
-    elif is_hot and aqi_val > AQI_ELEVATED:
+    elif is_hot and aqi_val is not None and aqi_val > AQI_ELEVATED:
         o3_conf = "medium"
         o3_score = 45
     else:
@@ -641,7 +646,7 @@ def score_hypotheses(
     # Sort hypotheses by score descending
     hypotheses.sort(key=lambda h: h["score"], reverse=True)
 
-    if aqi_val <= AQI_ELEVATED:
+    if aqi_val is not None and aqi_val <= AQI_ELEVATED:
         open_questions.append("Air quality index is currently in the 'Good' range (AQI ≤ 50).")
     if op_present and not measured_conflict and pm_elevated and daily_pct is not None and daily_pct >= DAILY_PERCENTILE_HIGH:
         open_questions.append(
