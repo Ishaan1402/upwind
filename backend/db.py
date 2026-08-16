@@ -25,6 +25,13 @@ def init_db():
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS place_cache (
+            key TEXT PRIMARY KEY,
+            payload_json TEXT NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
     conn.commit()
     
     # Safe migration if table existed without judge_verdict_json
@@ -120,3 +127,37 @@ def set_cached_geocode(query_normalized: str, payload: Dict[str, Any]):
         conn.close()
     except Exception as e:
         print(f"[SQLite Geocode Cache Write Error]: {e}")
+
+def get_cached_place(key: str, max_age_days: int = 365) -> Optional[Dict[str, Any]]:
+    """Read a cached place-context payload (e.g. ZCTA population under pop:{zip})."""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("SELECT payload_json, created_at FROM place_cache WHERE key = ?", (key,))
+        row = cursor.fetchone()
+        conn.close()
+
+        if not row:
+            return None
+
+        payload_json, created_at_str = row
+        created_at = _parse_created_at(created_at_str)
+        if datetime.now(timezone.utc).replace(tzinfo=None) - created_at < timedelta(days=max_age_days):
+            return json.loads(payload_json)
+    except Exception as e:
+        print(f"[SQLite Place Cache Read Error]: {e}")
+    return None
+
+def set_cached_place(key: str, payload: Dict[str, Any]):
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        now_str = datetime.now(timezone.utc).isoformat()
+        cursor.execute("""
+            INSERT OR REPLACE INTO place_cache (key, payload_json, created_at)
+            VALUES (?, ?, ?)
+        """, (key, json.dumps(payload), now_str))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"[SQLite Place Cache Write Error]: {e}")
