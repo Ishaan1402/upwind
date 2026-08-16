@@ -17,8 +17,7 @@ WILDLAND_CONTEXT_RE = re.compile(
     re.IGNORECASE,
 )
 
-# Urban / person / structure / vehicle fires — domain class, not place-specific names.
-# Blocks "Man Starts Fire…", "House Fire…", "Car Fire…" everywhere in the US.
+# Filter out urban, structural, or residential fire headlines
 URBAN_OR_PERSON_FIRE_RE = re.compile(
     r"(?i)"
     r"(\b(man|woman|men|person|people|teen|teenager|resident|homeowner|neighbor)\b.{0,48}\bfires?\b)"
@@ -26,12 +25,12 @@ URBAN_OR_PERSON_FIRE_RE = re.compile(
     r"(\b(house|home|apartment|condo|garage|warehouse|barn|vehicle|car|truck|bus|dumpster)\s+fires?\b)"
 )
 
-# Named-incident extractor: "Creek Fire", "Hay Creek Fire", "Dixie Complex"
+# Named incident pattern
 INCIDENT_NAME_RE = re.compile(
     r"\b([A-Z][a-zA-Z0-9'-]+(?:\s+[A-Z][a-zA-Z0-9'-]+)?)\s+(?:Fire|Wildfire|Complex)\b"
 )
 
-# Fire *categories* (not named incidents). Closed domain ontology.
+# Fire category generics
 FIRE_TYPE_GENERICS = {
     "Brush", "Grass", "Forest", "Structure", "House", "Home", "Building",
     "Vehicle", "Car", "Truck", "Dumpster", "Trash", "Rubbish", "Campfire",
@@ -78,7 +77,7 @@ def looks_like_verb_token(token: str) -> bool:
         return False
     if re.fullmatch(r"[A-Z][a-z]+(?:ed|ing)", t):
         return True
-    # Present-tense headline verbs: Starts, Sparks, Spreads — not Oaks/Hills/Falls
+    # Detect active headline verbs while preserving geographic nouns
     if re.fullmatch(r"[A-Z][a-z]+s", t) and t.endswith(("ts", "rs", "ks", "ds", "ns", "ps")):
         if t.lower() in {"oaks", "hills", "falls", "woods", "springs", "acres"}:
             return False
@@ -123,10 +122,7 @@ def title_allows_incident_extraction(title: str) -> bool:
 
 
 def parse_rss_items_for_incident(rss_text: str, max_days: int = 7) -> Optional[str]:
-    """
-    Parse Google News RSS for recent wildland named incidents (within max_days).
-    Uses structural title gates — not location-specific name blocklists.
-    """
+    """Parse Google News RSS for recent wildland named incidents within max_days"""
     items = re.findall(r"<item>(.*?)</item>", rss_text, re.DOTALL)
     for item in items:
         title_match = re.search(r"<title>(.*?)</title>", item)
@@ -151,11 +147,7 @@ def parse_rss_items_for_incident(rss_text: str, max_days: int = 7) -> Optional[s
 
 
 async def search_fire_incident_name(state: Optional[str], city: Optional[str], lat: float, lon: float) -> Optional[str]:
-    """
-    Search Google News RSS for recent wildland fire incident mentions (7-day window).
-    Queries bias toward wildfire/wildland language so urban 'fire' crime headlines are rare.
-    Naming is decorative — scoring only treats news as a fire vote when FIRMS corroborates.
-    """
+    """Search Google News RSS for recent wildland fire incident mentions"""
     location_str = (
         f"{city} {state}".strip()
         if (city or state)
