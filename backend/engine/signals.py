@@ -18,6 +18,7 @@ from backend.services.openaq import (
     monitor_source_label,
     OPENAQ_RADIUS_M,
 )
+from backend.engine.params import AOD_HAZE, AQI_ELEVATED, OZONE_HOT_TEMP_F
 
 TOOL_STEPS = {
     "weather_vector": "Calculating Open-Meteo wind trajectory & temperature",
@@ -241,7 +242,7 @@ async def iter_evidence_signals(
         try:
             async with asyncio.TaskGroup() as tg:
                 is_pm_elevated = (
-                    observation.get("aqi", 0) > 50 and "PM" in observation.get("primary_pollutant", "").upper()
+                    observation.get("aqi", 0) > AQI_ELEVATED and "PM" in observation.get("primary_pollutant", "").upper()
                 )
 
                 # T=0: independent position-only tasks
@@ -251,7 +252,7 @@ async def iter_evidence_signals(
                 ))
                 hms_t = tg.create_task(_run_feed("hms_scan", fetch_hms_smoke(lat, lon), "NOAA HMS smoke feed unavailable"))
                 openaq_t = tg.create_task(_run_feed(
-                    "openaq_monitors", collect_openaq_signal(lat, lon, include_baselines=observation.get("aqi", 0) > 50),
+                    "openaq_monitors", collect_openaq_signal(lat, lon, include_baselines=observation.get("aqi", 0) > AQI_ELEVATED),
                     "OpenAQ concentration feed unavailable",
                 ))
                 place_t = tg.create_task(_run_feed(
@@ -358,7 +359,7 @@ def build_evidence_signals(
     is_pm_primary = "PM" in primary_pollutant
     is_pm10_primary = "PM10" in primary_pollutant
     is_pm25_primary = is_pm_primary and not is_pm10_primary
-    is_pm_elevated = aqi_val > 50 and is_pm_primary
+    is_pm_elevated = aqi_val > AQI_ELEVATED and is_pm_primary
 
     wind_speed = weather.get("wind_speed_mph") if weather else None
     wind_dir = weather.get("wind_direction_deg") if weather else None
@@ -391,7 +392,7 @@ def build_evidence_signals(
     firms_details = firms_res.get("details", "")
     aod_value = float(aod_res.get("aod_value") or 0.0)
     firms_present = firms_status == "present"
-    has_corroboration = firms_present or (aod_res.get("status") == "present" and aod_value >= 0.2)
+    has_corroboration = firms_present or (aod_res.get("status") == "present" and aod_value >= AOD_HAZE)
 
     signals.append({
         "id": "firms_upwind",
@@ -465,7 +466,7 @@ def build_evidence_signals(
 
     # Signal 5: Ozone & Heat
     is_o3_primary = "O3" in primary_pollutant or "OZONE" in primary_pollutant
-    is_hot = (temp_f is not None) and (temp_f >= 85.0)
+    is_hot = (temp_f is not None) and (temp_f >= OZONE_HOT_TEMP_F)
     
     signals.append({
         "id": "ozone_heat",

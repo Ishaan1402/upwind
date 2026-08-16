@@ -20,29 +20,23 @@ from zoneinfo import ZoneInfo
 import httpx
 
 from backend.config import OPENAQ_API_KEY
+from backend.engine.params import (
+    BASELINE_DAYS,
+    MAX_READING_AGE_S,
+    MIN_PERCENT_COMPLETE,
+    OPENAQ_PREFERRED_RADIUS_M,
+    OPENAQ_RADIUS_M,
+    SAME_HOUR_MIN_SAMPLES,
+    SAME_HOUR_WINDOW_DAYS,
+)
 
 OPENAQ_BASE_URL = "https://api.openaq.org"
 OPENAQ_TIMEOUT_S = 3.0
-
-# Search radius in meters
-OPENAQ_PREFERRED_RADIUS_M = 10_000
-OPENAQ_RADIUS_M = 25_000
 
 # Cache TTLs in seconds
 CACHE_TTL_LOCATION_S = 24 * 3600
 CACHE_TTL_LATEST_S = 15 * 60
 CACHE_TTL_BASELINE_S = 24 * 3600
-
-# Hourly monitor readings (3h)
-MAX_READING_AGE_S = 3 * 3600
-
-# Baseline historical window settings
-BASELINE_DAYS = 365
-SAME_HOUR_WINDOW_DAYS = 30
-SAME_HOUR_MIN_SAMPLES = 5
-
-# Completeness threshold for aggregated records
-MIN_PERCENT_COMPLETE = 75.0
 
 CANONICAL_PM_UNIT = "µg/m³"
 CANONICAL_PPB_UNIT = "ppb"
