@@ -6,16 +6,8 @@ from backend.services.firms import (
     calculate_bearing_degrees,
     bearing_degrees_to_compass,
     angular_difference,
-    UPWIND_SECTOR_WIDTH_DEG,
 )
-from backend.engine.params import (
-    WFIGS_ACTIVITY_FLOOR,
-    WFIGS_DEFAULT_SIZE_ACRES,
-    WFIGS_MAX_CONTAINMENT_PCT,
-    WFIGS_MAX_RADIUS_MILES,
-    WFIGS_RELEVANCE_EPS_MILES,
-    WFIGS_UPWIND_BONUS,
-)
+from backend.engine.params import get_params
 
 # NIFC WFIGS current incident locations endpoint
 WFIGS_URLS = [
@@ -123,13 +115,14 @@ def _select_relevant_wildfires(
     alignment x distance decay) so the largest, most-active, upwind fire wins
     instead of simply the nearest one.
 
-    Only named wildfires within WFIGS_MAX_RADIUS_MILES that are not >90%
+    Only named wildfires within ``wfigs_max_radius_miles`` that are not >90%
     contained qualify. Rows with missing or invalid coordinates are ignored.
     Distance/bearing are computed from the target (bearing = direction the
     incident sits from the target); upwind means within
-    UPWIND_SECTOR_WIDTH_DEG of the wind's FROM direction. Each returned
+    ``upwind_sector_width_deg`` of the wind's FROM direction. Each returned
     incident carries a rounded `relevance` score.
     """
+    p = get_params()
     incidents: List[Dict[str, Any]] = []
     for feature in features:
         props = feature.get("properties", {}) or {}
@@ -147,16 +140,16 @@ def _select_relevant_wildfires(
             continue
 
         contained_pct = _parse_optional_float(props.get("PercentContained"))
-        if contained_pct is not None and contained_pct >= WFIGS_MAX_CONTAINMENT_PCT:
+        if contained_pct is not None and contained_pct >= p.wfigs_max_containment_pct:
             continue
 
         dist_km, dist_mi = calculate_haversine_distance(target_lat, target_lon, fire_lat, fire_lon)
-        if dist_mi > WFIGS_MAX_RADIUS_MILES:
+        if dist_mi > p.wfigs_max_radius_miles:
             continue
 
         bearing_deg = calculate_bearing_degrees(target_lat, target_lon, fire_lat, fire_lon)
         is_upwind = wind_dir_deg is None or (
-            angular_difference(bearing_deg, wind_dir_deg % 360) <= UPWIND_SECTOR_WIDTH_DEG
+            angular_difference(bearing_deg, wind_dir_deg % 360) <= p.upwind_sector_width_deg
         )
 
         state = str(props.get("POOState") or "")
@@ -186,15 +179,15 @@ def _select_relevant_wildfires(
     for incident in incidents:
         activity = max(
             1.0 - (incident["percent_contained"] or 0.0) / 100.0,
-            WFIGS_ACTIVITY_FLOOR,
+            p.wfigs_activity_floor,
         )
         size = (
             incident["size_acres"]
             if incident["size_acres"] is not None
-            else WFIGS_DEFAULT_SIZE_ACRES
+            else p.wfigs_default_size_acres
         )
-        upwind = WFIGS_UPWIND_BONUS if incident["is_upwind"] else 1.0
-        decay = 1.0 / (incident["distance_miles"] + WFIGS_RELEVANCE_EPS_MILES)
+        upwind = p.wfigs_upwind_bonus if incident["is_upwind"] else 1.0
+        decay = 1.0 / (incident["distance_miles"] + p.wfigs_relevance_eps_miles)
         incident["relevance"] = round(size * activity * upwind * decay, 1)
 
     incidents.sort(key=lambda i: i["relevance"], reverse=True)
@@ -213,6 +206,7 @@ async def fetch_wfigs_incident(
     return status "unavailable"; healthy query with no qualifying incidents
     return "absent".
     """
+    p = get_params()
     params = {
         "f": "geojson",
         "where": "IncidentTypeCategory='WF'",
@@ -222,7 +216,7 @@ async def fetch_wfigs_incident(
         "geometry": f"{lon},{lat}",
         "geometryType": "esriGeometryPoint",
         "spatialRel": "esriSpatialRelIntersects",
-        "distance": WFIGS_MAX_RADIUS_MILES,
+        "distance": p.wfigs_max_radius_miles,
         "units": "esriSRUnit_StatuteMile",
         "inSR": 4326,
         "orderByFields": "ModifiedOnDateTime_dt DESC",

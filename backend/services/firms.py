@@ -4,23 +4,7 @@ from datetime import datetime, timezone
 from typing import Dict, Any, List, Optional, Tuple
 import httpx
 from backend.config import FIRMS_MAP_KEY
-from backend.engine.params import (
-    FIRMS_CLUSTER_RADIUS_KM,
-    FIRMS_CONFIDENCE_WEIGHT,
-    FIRMS_DEFAULT_WIND_MPH,
-    FIRMS_MAX_AGE_HOURS,
-    FIRMS_MAX_RADIUS_MILES,
-    FIRMS_MIN_CLUSTER_FRP,
-    FIRMS_MIN_RADIUS_MILES,
-    FIRMS_PERSISTENCE_CAP,
-    FIRMS_PERSISTENCE_STEP,
-    FIRMS_RADIUS_WIND_FACTOR,
-    FIRMS_RECENCY_FLOOR,
-    FIRMS_RECENCY_HALF_LIFE_HOURS,
-    FIRMS_RELEVANCE_EPS_MILES,
-    FIRMS_UPWIND_BONUS,
-    UPWIND_SECTOR_WIDTH_DEG,
-)
+from backend.engine.params import Params, get_params
 
 # Active VIIRS NRT instruments. FIRMS's area/csv endpoint does NOT accept a
 # comma-joined source list (it returns HTTP 400 "Invalid source"), so each
@@ -29,9 +13,13 @@ from backend.engine.params import (
 FIRMS_SOURCES = ("VIIRS_SNPP_NRT", "VIIRS_NOAA20_NRT", "VIIRS_NOAA21_NRT")
 
 
-def firms_search_radius_miles(wind_speed_mph: Optional[float] = None) -> float:
+def firms_search_radius_miles(
+    wind_speed_mph: Optional[float] = None,
+    params: Optional[Params] = None,
+) -> float:
     """Search radius for FIRMS bbox - floored so calm conditions still cover nearby fires."""
-    return min(FIRMS_MAX_RADIUS_MILES, max(FIRMS_MIN_RADIUS_MILES, (wind_speed_mph or FIRMS_DEFAULT_WIND_MPH) * FIRMS_RADIUS_WIND_FACTOR))
+    p = params if params is not None else get_params()
+    return min(p.firms_max_radius_miles, max(p.firms_min_radius_miles, (wind_speed_mph or p.firms_default_wind_mph) * p.firms_radius_wind_factor))
 
 def calculate_haversine_distance(lat1: float, lon1: float, lat2: float, lon2: float) -> Tuple[float, float]:
     """
@@ -70,14 +58,15 @@ def angular_difference(deg_a: float, deg_b: float) -> float:
 def filter_upwind_hotspots(hotspots: List[Dict[str, Any]], wind_dir_deg: Optional[float]) -> List[Dict[str, Any]]:
     """
     Given hotspots (each with a 'bearing_deg' float field), return only those
-    within UPWIND_SECTOR_WIDTH_DEG of the true upwind bearing.
+    within ``upwind_sector_width_deg`` of the true upwind bearing.
     If wind_dir_deg is None (wind unknown), return all hotspots unfiltered.
     """
     if wind_dir_deg is None:
         return hotspots
+    p = get_params()
     # Upwind bearing from target is wind_dir_deg itself
     upwind_target_deg = wind_dir_deg % 360
-    return [h for h in hotspots if angular_difference(h["bearing_deg"], upwind_target_deg) <= UPWIND_SECTOR_WIDTH_DEG]
+    return [h for h in hotspots if angular_difference(h["bearing_deg"], upwind_target_deg) <= p.upwind_sector_width_deg]
 
 def build_upwind_bbox(lat: float, lon: float, wind_dir_deg: float, radius_miles: float = 100.0) -> Tuple[float, float, float, float]:
     """
@@ -197,7 +186,7 @@ def cluster_firms_hotspots(
     hotspots: List[Dict[str, Any]],
     target_lat: float,
     target_lon: float,
-    cluster_radius_km: float = FIRMS_CLUSTER_RADIUS_KM,
+    cluster_radius_km: Optional[float] = None,
 ) -> List[Dict[str, Any]]:
     """
     Greedy centroid clustering over surviving FIRMS pixels (pure Python).
@@ -210,11 +199,14 @@ def cluster_firms_hotspots(
     informational. Confidence weight is the max member weight, and the detection
     count feeds a bounded persistence multiplier. Returns clusters sorted by
     relevance (desc) after dropping clusters whose summed FRP falls below
-    FIRMS_MIN_CLUSTER_FRP.
+    ``firms_min_cluster_frp``.
     """
     if not hotspots:
         return []
 
+    p = get_params()
+    if cluster_radius_km is None:
+        cluster_radius_km = p.firms_cluster_radius_km
     ordered = sorted(hotspots, key=lambda h: h["frp"], reverse=True)
     member_groups: List[List[Dict[str, Any]]] = []
     centroids: List[Tuple[float, float]] = []
@@ -284,7 +276,7 @@ def cluster_firms_hotspots(
         clat = sum(m["lat"] for m in members) / n
         clon = sum(m["lon"] for m in members) / n
         frp = sum(m["frp"] for m in members)
-        if frp < FIRMS_MIN_CLUSTER_FRP:
+        if frp < p.firms_min_cluster_frp:
             continue
 
         age_hours = min(m["age_hours"] for m in members)  # most recent detection drives recency
@@ -292,13 +284,13 @@ def cluster_firms_hotspots(
         best_member = max(members, key=lambda m: m.get("confidence_weight", 1.0))
         confidence_weight = best_member.get("confidence_weight", 1.0)
         peak_frp = max(m["frp"] for m in members)
-        persistence = min(1.0 + FIRMS_PERSISTENCE_STEP * (n - 1), FIRMS_PERSISTENCE_CAP)
+        persistence = min(1.0 + p.firms_persistence_step * (n - 1), p.firms_persistence_cap)
 
         dist_km, dist_mi = calculate_haversine_distance(target_lat, target_lon, clat, clon)
         bearing_deg = calculate_bearing_degrees(target_lat, target_lon, clat, clon)
-        recency = max(FIRMS_RECENCY_FLOOR, 2 ** (-age_hours / FIRMS_RECENCY_HALF_LIFE_HOURS))
-        upwind = FIRMS_UPWIND_BONUS if is_upwind else 1.0
-        decay = 1.0 / (dist_mi + FIRMS_RELEVANCE_EPS_MILES)
+        recency = max(p.firms_recency_floor, 2 ** (-age_hours / p.firms_recency_half_life_hours))
+        upwind = p.firms_upwind_bonus if is_upwind else 1.0
+        decay = 1.0 / (dist_mi + p.firms_relevance_eps_miles)
 
         cluster = {
             "lat": round(clat, 4),
@@ -347,6 +339,7 @@ async def fetch_firms_hotspots(
             "details": "NASA FIRMS API key not configured"
         }
 
+    p = get_params()
     # Floor search radius at 75 mi to cover nearby fires under calm winds
     radius_miles = firms_search_radius_miles(wind_speed_mph)
     wind_dir = wind_dir_deg if wind_dir_deg is not None else 180.0
@@ -424,12 +417,12 @@ async def fetch_firms_hotspots(
                 acq_dt = parse_firms_acq_datetime(row.get("acq_date"), row.get("acq_time"))
                 # Missing/malformed acq fields degrade gracefully: treat as fresh.
                 age_hours = 0.0 if acq_dt is None else max(0.0, (reference - acq_dt).total_seconds() / 3600.0)
-                if age_hours > FIRMS_MAX_AGE_HOURS:
+                if age_hours > p.firms_max_age_hours:
                     continue
 
                 confidence = row.get("confidence")
                 # Unknown/missing confidence keeps a neutral weight of 1.0.
-                confidence_weight = FIRMS_CONFIDENCE_WEIGHT.get(confidence, 1.0)
+                confidence_weight = p.firms_confidence_weight.get(confidence, 1.0)
                 if confidence_weight == 0.0:
                     continue  # "low" confidence detections (sun glint / false positives) dropped
 
@@ -439,10 +432,10 @@ async def fetch_firms_hotspots(
 
                 dist_km, dist_mi = calculate_haversine_distance(target_lat, target_lon, h_lat, h_lon)
                 bearing_deg = calculate_bearing_degrees(target_lat, target_lon, h_lat, h_lon)
-                is_upwind = wind_dir_deg is None or angular_difference(bearing_deg, upwind_target_deg) <= UPWIND_SECTOR_WIDTH_DEG
-                recency = max(FIRMS_RECENCY_FLOOR, 2 ** (-age_hours / FIRMS_RECENCY_HALF_LIFE_HOURS))
-                upwind = FIRMS_UPWIND_BONUS if is_upwind else 1.0
-                decay = 1.0 / (dist_mi + FIRMS_RELEVANCE_EPS_MILES)
+                is_upwind = wind_dir_deg is None or angular_difference(bearing_deg, upwind_target_deg) <= p.upwind_sector_width_deg
+                recency = max(p.firms_recency_floor, 2 ** (-age_hours / p.firms_recency_half_life_hours))
+                upwind = p.firms_upwind_bonus if is_upwind else 1.0
+                decay = 1.0 / (dist_mi + p.firms_relevance_eps_miles)
 
                 pixels.append({
                     "lat": h_lat,

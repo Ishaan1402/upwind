@@ -5,6 +5,7 @@ import pytest
 import asyncio
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock, patch
+from backend.engine.params import DEFAULT
 from backend.services.firms import (
     calculate_bearing_degrees,
     calculate_haversine_distance,
@@ -12,9 +13,6 @@ from backend.services.firms import (
     filter_upwind_hotspots,
     firms_search_radius_miles,
     cluster_firms_hotspots,
-    FIRMS_CLUSTER_RADIUS_KM,
-    FIRMS_MIN_CLUSTER_FRP,
-    FIRMS_MIN_RADIUS_MILES,
     parse_firms_csv_rows,
     fetch_firms_hotspots,
 )
@@ -138,8 +136,8 @@ def test_filter_upwind_hotspots_no_wind_returns_all():
     assert len(res) == 2
 
 def test_firms_search_radius_floors_calm_winds():
-    assert firms_search_radius_miles(0.0) == FIRMS_MIN_RADIUS_MILES
-    assert firms_search_radius_miles(3.0) == FIRMS_MIN_RADIUS_MILES
+    assert firms_search_radius_miles(0.0) == DEFAULT.firms_min_radius_miles
+    assert firms_search_radius_miles(3.0) == DEFAULT.firms_min_radius_miles
     assert firms_search_radius_miles(20.0) == 100.0
     assert firms_search_radius_miles(50.0) == 150.0
 
@@ -356,7 +354,7 @@ def test_fetch_firms_drops_low_confidence_detections():
 
 
 def test_fetch_firms_clusters_merge_pixels_with_summed_frp():
-    """Two pixels within FIRMS_CLUSTER_RADIUS_KM merge into one cluster with
+    """Two pixels within DEFAULT.firms_cluster_radius_km merge into one cluster with
     summed FRP and detections == 2; that cluster outranks a lone zero-FRP pixel."""
     csv = (
         f"{FIRMS_CSV_HEADER}\n"
@@ -494,7 +492,7 @@ def test_cluster_firms_peak_frp_and_persistence():
 
 def test_cluster_firms_persistence_capped():
     """Five co-located detections would give 1.0 + 0.2*4 = 1.8, but the
-    persistence factor is capped at FIRMS_PERSISTENCE_CAP (1.6)."""
+    persistence factor is capped at DEFAULT.firms_persistence_cap (1.6)."""
     pixels = [
         {"lat": 43.586, "lon": -119.100, "frp": 2.0, "age_hours": 0.0,
          "confidence": "nominal", "confidence_weight": 0.7, "is_upwind": True},
@@ -624,7 +622,7 @@ def _synthetic_hotspot(lat: float, lon: float, frp: float) -> dict:
     }
 
 
-def _naive_cluster_signature(hotspots, cluster_radius_km=FIRMS_CLUSTER_RADIUS_KM):
+def _naive_cluster_signature(hotspots, cluster_radius_km=DEFAULT.firms_cluster_radius_km):
     """O(hotspots x clusters) reference: replicate the pre-grid greedy centroid
     clustering exactly and return the surviving clusters' signature as
     (ordered member (lat, lon) tuples, summed FRP rounded like the output, detections)."""
@@ -651,7 +649,7 @@ def _naive_cluster_signature(hotspots, cluster_radius_km=FIRMS_CLUSTER_RADIUS_KM
     return [
         (tuple((m["lat"], m["lon"]) for m in g), round(sum(m["frp"] for m in g), 1), len(g))
         for g in member_groups
-        if sum(m["frp"] for m in g) >= FIRMS_MIN_CLUSTER_FRP
+        if sum(m["frp"] for m in g) >= DEFAULT.firms_min_cluster_frp
     ]
 
 

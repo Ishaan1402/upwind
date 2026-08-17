@@ -31,7 +31,7 @@ never changes how an included sample is derived.
 import sys
 from typing import Callable, Dict, Iterable, List, Optional, Tuple
 
-from backend.engine.params import AQI_ELEVATED
+from backend.engine.params import LABEL_PARAMS
 from backend.eval.accuracy.labels import build_observation, classify_sample
 from backend.eval.accuracy.metrics import compute_metrics
 from backend.eval.accuracy.records import LabelRecord, PredictionRecord
@@ -132,13 +132,15 @@ def label_sample(
     if lat is not None and lon is not None:
         wind_speed = weather.wind_max_mph if weather is not None else None
         wind_dir = weather.wind_dir_dominant_deg if weather is not None else None
-        radius_mi = firms_search_radius_miles(wind_speed)
+        radius_mi = firms_search_radius_miles(wind_speed, params=LABEL_PARAMS)
 
         hms_res = _hms_res_from_store(store, date_local, lat, lon)
         if hms_res.get("status") == "present":
             smoke_density = hms_res.get("density")
 
-        pixels = _hotspots_for_day(store, lat, lon, date_local, wind_dir, radius_mi)
+        pixels = _hotspots_for_day(
+            store, lat, lon, date_local, wind_dir, radius_mi, params=LABEL_PARAMS
+        )
         upwind_fire = any(p.get("is_upwind") is True for p in pixels)
 
     return classify_sample(
@@ -199,7 +201,9 @@ def run_accuracy_eval(
         # non-elevated-AQI day is mapped to "clean" regardless of what the
         # scorer ranks first (a missing AQI is NOT clean). top_score and
         # top_confidence still record the top hypothesis for transparency.
-        if observation.get("aqi") is not None and observation["aqi"] <= AQI_ELEVATED:
+        # LABEL_PARAMS (frozen) keeps this prediction-side definition identical
+        # to the label's clean definition.
+        if observation.get("aqi") is not None and observation["aqi"] <= LABEL_PARAMS.aqi_elevated:
             predicted_label = "clean"
 
         true = label_sample(store, site_id, date_local)

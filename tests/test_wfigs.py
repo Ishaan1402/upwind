@@ -3,7 +3,6 @@ from unittest.mock import AsyncMock, Mock, patch
 from backend.services.wfigs import (
     fetch_wfigs_incident,
     _select_relevant_wildfires,
-    WFIGS_MAX_RADIUS_MILES,
 )
 
 

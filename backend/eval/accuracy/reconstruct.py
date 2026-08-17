@@ -16,7 +16,8 @@ Reused rather than reimplemented:
 - ``cluster_firms_hotspots`` and the distance/bearing helpers from
   ``backend.services.firms`` (FIRMS clustering/weighting stays identical)
 - ``_point_in_ring_set`` from ``backend.services.hms`` (GeoJSON ring semantics)
-- ``firms_search_radius_miles`` / ``FIRMS_*`` params from ``backend.engine.params``
+- ``firms_search_radius_miles`` / the ``Params`` dataclass from
+  ``backend.engine.params``
 - ``build_observation`` from ``labels`` (daily AQI aggregation)
 
 Only the archive-to-dict glue is implemented here.
@@ -28,11 +29,7 @@ from datetime import date, datetime, time, timedelta, timezone
 from typing import Dict, List, Optional, Tuple
 
 from backend.config import get_aqi_category
-from backend.engine.params import (
-    FIRMS_CONFIDENCE_WEIGHT,
-    FIRMS_MAX_AGE_HOURS,
-    UPWIND_SECTOR_WIDTH_DEG,
-)
+from backend.engine.params import Params, get_params
 from backend.engine.score import score_hypotheses
 from backend.engine.signals import build_evidence_signals
 from backend.eval.accuracy.labels import build_observation
@@ -116,6 +113,7 @@ def _hotspots_for_day(
     date_local: str,
     wind_dir_deg: Optional[float],
     radius_mi: float,
+    params: Optional[Params] = None,
 ) -> List[Dict]:
     """FIRMS pixels near ``(lat, lon)`` for the day, as ``fetch_firms_hotspots``
     builds them.
@@ -129,7 +127,12 @@ def _hotspots_for_day(
     confidence weight/upwind) match the production pixel dict; per-pixel
     ``relevance`` is left 0 because clustering recomputes relevance from FRP,
     distance, recency and upwind alignment.
+
+    ``params`` defaults to the active params (``get_params()``); the label path
+    passes ``LABEL_PARAMS`` explicitly so the label's upwind-fire definition is
+    frozen against scorer tuning.
     """
+    p = params if params is not None else get_params()
     target_date = date.fromisoformat(date_local)
 
     lat_delta = radius_mi / 69.0
@@ -157,12 +160,12 @@ def _hotspots_for_day(
     for rec in records:
         acq_dt = datetime.fromisoformat(rec.acq_datetime)
         age_hours = max(0.0, (reference - acq_dt).total_seconds() / 3600.0)
-        if age_hours > FIRMS_MAX_AGE_HOURS:
+        if age_hours > p.firms_max_age_hours:
             continue
 
         # Unknown/missing confidence keeps a neutral weight of 1.0; "low"
         # detections (sun glint / false positives) are dropped outright.
-        confidence_weight = FIRMS_CONFIDENCE_WEIGHT.get(rec.confidence, 1.0)
+        confidence_weight = p.firms_confidence_weight.get(rec.confidence, 1.0)
         if confidence_weight == 0.0:
             continue
 
@@ -170,7 +173,7 @@ def _hotspots_for_day(
         bearing_deg = calculate_bearing_degrees(lat, lon, rec.lat, rec.lon)
         is_upwind = (
             wind_dir_deg is None
-            or angular_difference(bearing_deg, upwind_target_deg) <= UPWIND_SECTOR_WIDTH_DEG
+            or angular_difference(bearing_deg, upwind_target_deg) <= p.upwind_sector_width_deg
         )
 
         pixels.append({
@@ -327,8 +330,8 @@ def _openaq_sig_from_aqs(aqs_records: List[AqsDailyRecord], date_local: str) -> 
     with the highest concentration wins. PM2.5 (88101) and PM10 (81102) carry
     through with their reported units; O3/NO2/SO2 (44201/42602/42401) are
     normalized to ppb (×1000 when stored in ppm) and CO (42101) is carried as
-    ppm — the units ``score_hypotheses`` compares against ``OPENAQ_*``
-    thresholds.
+    ppm — the units ``score_hypotheses`` compares against the OpenAQ
+    thresholds carried on :class:`Params` (via :func:`get_params`).
     """
     def _pick(rows: List[AqsDailyRecord]) -> Optional[AqsDailyRecord]:
         """Best row for one parameter: max non-null AQI (tie-break: max

@@ -16,9 +16,8 @@ from backend.services.openaq import (
     fetch_same_hour_baseline,
     sensor_id_for_parameter,
     monitor_source_label,
-    OPENAQ_RADIUS_M,
 )
-from backend.engine.params import AOD_HAZE, AQI_ELEVATED, OZONE_HOT_TEMP_F
+from backend.engine.params import get_params
 
 TOOL_STEPS = {
     "weather_vector": "Calculating Open-Meteo wind trajectory & temperature",
@@ -54,6 +53,7 @@ async def collect_openaq_signal(
     lat: float, lon: float, include_baselines: bool = True
 ) -> Dict[str, Any]:
     # Gather OpenAQ data; fetch past 3h US reference data for attribution. Fall back to "unavailable" on missing or stale data, skips baselines when include_baselines=False to save latency.
+    p = get_params()
     try:
         candidates = await discover_reference_monitors(lat, lon, limit=3)
         if not candidates:
@@ -73,7 +73,7 @@ async def collect_openaq_signal(
 
         # Widen radius when nearest monitor lacks fresh readings
         if not latest_by_id:
-            wider = await discover_reference_monitors(lat, lon, limit=10, radius_m=OPENAQ_RADIUS_M)
+            wider = await discover_reference_monitors(lat, lon, limit=10, radius_m=p.openaq_radius_m)
             if wider:
                 new_ids = [c["location_id"] for c in candidates]
                 wider_results = await asyncio.gather(
@@ -239,10 +239,11 @@ async def iter_evidence_signals(
         return name
 
     async def _orchestrate():
+        p = get_params()
         try:
             async with asyncio.TaskGroup() as tg:
                 is_pm_elevated = (
-                    observation.get("aqi", 0) > AQI_ELEVATED and "PM" in observation.get("primary_pollutant", "").upper()
+                    observation.get("aqi", 0) > p.aqi_elevated and "PM" in observation.get("primary_pollutant", "").upper()
                 )
 
                 # T=0: independent position-only tasks
@@ -252,7 +253,7 @@ async def iter_evidence_signals(
                 ))
                 hms_t = tg.create_task(_run_feed("hms_scan", fetch_hms_smoke(lat, lon), "NOAA HMS smoke feed unavailable"))
                 openaq_t = tg.create_task(_run_feed(
-                    "openaq_monitors", collect_openaq_signal(lat, lon, include_baselines=observation.get("aqi", 0) > AQI_ELEVATED),
+                    "openaq_monitors", collect_openaq_signal(lat, lon, include_baselines=observation.get("aqi", 0) > p.aqi_elevated),
                     "OpenAQ concentration feed unavailable",
                 ))
                 place_t = tg.create_task(_run_feed(
@@ -349,6 +350,7 @@ def build_evidence_signals(
     hms_res = hms_res or {"status": "unavailable", "details": "NOAA HMS smoke feed not queried"}
     wfigs_res = wfigs_res or {"status": "unavailable", "details": "WFIGS incident feed not queried"}
     place_res = place_res or {"status": "unavailable", "details": "Census place context not queried"}
+    p = get_params()
     aqi_val = observation.get("aqi", 0)
     primary_pollutant = observation.get("primary_pollutant", "").upper()
     pollutants = observation.get("pollutants", {})
@@ -360,7 +362,7 @@ def build_evidence_signals(
     is_pm10_primary = "PM10" in primary_pollutant
     is_pm25_primary = is_pm_primary and not is_pm10_primary
     # None-safe: a missing AQI is unknown, never elevated.
-    is_pm_elevated = aqi_val is not None and aqi_val > AQI_ELEVATED and is_pm_primary
+    is_pm_elevated = aqi_val is not None and aqi_val > p.aqi_elevated and is_pm_primary
 
     wind_speed = weather.get("wind_speed_mph") if weather else None
     wind_dir = weather.get("wind_direction_deg") if weather else None
@@ -393,7 +395,7 @@ def build_evidence_signals(
     firms_details = firms_res.get("details", "")
     aod_value = float(aod_res.get("aod_value") or 0.0)
     firms_present = firms_status == "present"
-    has_corroboration = firms_present or (aod_res.get("status") == "present" and aod_value >= AOD_HAZE)
+    has_corroboration = firms_present or (aod_res.get("status") == "present" and aod_value >= p.aod_haze)
 
     signals.append({
         "id": "firms_upwind",
@@ -467,7 +469,7 @@ def build_evidence_signals(
 
     # Signal 5: Ozone & Heat
     is_o3_primary = "O3" in primary_pollutant or "OZONE" in primary_pollutant
-    is_hot = (temp_f is not None) and (temp_f >= OZONE_HOT_TEMP_F)
+    is_hot = (temp_f is not None) and (temp_f >= p.ozone_hot_temp_f)
     
     signals.append({
         "id": "ozone_heat",
