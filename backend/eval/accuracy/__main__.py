@@ -15,6 +15,8 @@ Subcommands:
           scoped; downloads land under ``RAW_DATA_DIR/<source>/<year>/``
   status  print per-source ingest watermarks, table row counts, and the
           min/max date in aqs_daily
+  tune    Phase-2 coordinate search: sweep scorer thresholds over the site-
+          level VAL holdout against frozen labels and print a ranked table
 """
 
 import argparse
@@ -38,6 +40,7 @@ from backend.eval.accuracy.runner import (
     run_accuracy_eval,
 )
 from backend.eval.accuracy.store import ACCURACY_DB_PATH, AccuracyStore
+from backend.eval.accuracy.tune import PHASE2_GRID, run_tune
 
 # Compact confusion-matrix column labels (7 columns stay printable).
 _CONFUSION_ABBREV = {
@@ -153,6 +156,86 @@ def label_command(
             if i % PROGRESS_INTERVAL == 0:
                 print(f"  processed {i}/{total}", file=sys.stderr)
         return {"samples": len(samples), "label_counts": counts}
+
+
+# ---------------------------------------------------------------------------
+# tune subcommand
+# ---------------------------------------------------------------------------
+
+# Named tuning grids: a grid name maps to a list of (name, overrides) combos
+# for ``run_tune``. Only known grids are accepted so a typo never silently
+# tunes nothing.
+_TUNE_GRIDS = {"phase2": PHASE2_GRID}
+
+# Ranked-table per-class F1 columns: (column header, LABEL_CLASSES key).
+_TUNE_F1_COLUMNS = (
+    ("smoke", "wildfire_smoke"),
+    ("dust", "windblown_dust"),
+    ("urban", "urban_industrial_pm"),
+    ("stagn", "winter_stagnation"),
+    ("ozone", "ozone_episode"),
+)
+
+
+def _fmt_metric(value: Optional[float]) -> str:
+    """None-safe 3-decimal metric formatter for the ranked tune table."""
+    return "-" if value is None else f"{value:.3f}"
+
+
+def tune_command(
+    db_path: str,
+    start: str,
+    end: str,
+    bbox: Optional[Tuple[float, float, float, float]] = None,
+    limit: Optional[int] = None,
+    val_fraction: float = 0.2,
+    grid: str = "phase2",
+) -> List[Dict[str, Any]]:
+    """Run the Phase-2 coordinate search: sweep scorer thresholds over the
+    site-level VAL holdout of the in-scope sites against frozen labels, and
+    return the ranked result rows (printing is left to the CLI). Unknown grid
+    names raise ``ValueError``."""
+    if grid not in _TUNE_GRIDS:
+        raise ValueError(
+            f"unknown grid {grid!r} (choose from {sorted(_TUNE_GRIDS)})"
+        )
+    with AccuracyStore(db_path) as store:
+        return run_tune(
+            store,
+            start,
+            end,
+            bbox=bbox,
+            limit=limit,
+            val_fraction=val_fraction,
+            grid=_TUNE_GRIDS[grid],
+        )
+
+
+def _print_tune_table(rows: List[Dict[str, Any]]) -> None:
+    """Print the ranked tune results as a readable table.
+
+    Columns: name | non_clean_top1 | macro_f1 | smoke/dust/urban/stagnation/
+    ozone F1 | overrides. Missing metrics render as ``-``.
+    """
+    header = (
+        f"{'name':<30}"
+        f"{'non_clean_top1':>14}{'macro_f1':>10}"
+        + "".join(f"{header:>10}" for header, _ in _TUNE_F1_COLUMNS)
+        + "  overrides"
+    )
+    print(header)
+    for row in rows:
+        per_class = row["per_class"]
+        line = (
+            f"{row['name']:<30}"
+            f"{_fmt_metric(row['non_clean_top1_accuracy']):>14}"
+            f"{_fmt_metric(row['macro_f1']):>10}"
+        )
+        for _, cls in _TUNE_F1_COLUMNS:
+            line += f"{_fmt_metric(per_class.get(cls, {}).get('f1')):>10}"
+        overrides = row["params"]
+        line += f"  {overrides if overrides else '-'}"
+        print(line)
 
 
 # ---------------------------------------------------------------------------
@@ -521,6 +604,36 @@ def main(argv: Optional[List[str]] = None) -> int:
     )
     _add_db_arg(label_parser)
 
+    tune_parser = subparsers.add_parser(
+        "tune",
+        help="sweep scorer thresholds over the val holdout vs frozen labels",
+    )
+    tune_parser.add_argument(
+        "--start", required=True, type=_date_type,
+        help="inclusive start date (YYYY-MM-DD)",
+    )
+    tune_parser.add_argument(
+        "--end", required=True, type=_date_type,
+        help="inclusive end date (YYYY-MM-DD)",
+    )
+    tune_parser.add_argument(
+        "--bbox", type=_bbox_type, default=None,
+        help="tune only sites inside west,south,east,north",
+    )
+    tune_parser.add_argument(
+        "--limit", type=int, default=None,
+        help="cap the number of val samples scored per combo",
+    )
+    tune_parser.add_argument(
+        "--val-fraction", type=float, default=0.2,
+        help="fraction of sites held out for validation (default: 0.2)",
+    )
+    tune_parser.add_argument(
+        "--grid", type=str, default="phase2",
+        help=f"tuning grid name (default: phase2; choices: {sorted(_TUNE_GRIDS)})",
+    )
+    _add_db_arg(tune_parser)
+
     ingest_parser = subparsers.add_parser(
         "ingest",
         help="ingest historical raw data (idempotent, resumable, bbox-scoped)",
@@ -548,6 +661,29 @@ def main(argv: Optional[List[str]] = None) -> int:
     elif args.command == "label":
         result = label_command(args.db, args.start, args.end, limit=args.limit, bbox=args.bbox)
         print(json.dumps(result, indent=2, default=str))
+    elif args.command == "tune":
+        try:
+            rows = tune_command(
+                args.db,
+                args.start,
+                args.end,
+                bbox=args.bbox,
+                limit=args.limit,
+                val_fraction=args.val_fraction,
+                grid=args.grid,
+            )
+        except ValueError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+        if rows:
+            print(
+                f"tuned {len(rows)} param combo(s) over "
+                f"{rows[0]['total']} val site-day sample(s) "
+                f"({rows[0]['elevated_count']} elevated)"
+            )
+            _print_tune_table(rows)
+        else:
+            print("tune: no val-holdout samples in range; nothing to rank")
     elif args.command == "ingest":
         return ingest_command(args)
     elif args.command == "status":
