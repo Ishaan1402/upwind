@@ -8,7 +8,7 @@ lives under ``backend/eval/accuracy/data/accuracy.db`` and is created lazily.
 import os
 import sqlite3
 from pathlib import Path
-from typing import Iterable, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Tuple
 
 from backend.eval.accuracy.records import (
     AqsDailyRecord,
@@ -16,6 +16,8 @@ from backend.eval.accuracy.records import (
     HmsSmokeRecord,
     LabelRecord,
     PredictionRecord,
+    SpeciationRow,
+    TransportWindRecord,
     WeatherDailyRecord,
 )
 
@@ -65,14 +67,19 @@ CREATE TABLE IF NOT EXISTS weather_daily (
     tmin_f                REAL,
     wind_max_mph          REAL,
     wind_dir_dominant_deg INTEGER,
+    precipitation_mm      REAL,
+    wind_gust_max_mph     REAL,
     ingested_at           TEXT NOT NULL DEFAULT (datetime('now')),
     PRIMARY KEY (site_id, date_local)
 )
 """
 
+# Columns the ``weather_daily`` INSERT writes. The precip/gust columns were
+# added to the schema AFTER the table first shipped (2016-2021 rows exist), so
+# ``_ensure_weather_daily_columns`` migrates pre-existing tables in place.
 _WEATHER_DAILY_COLUMNS = (
     "site_id, lat, lon, date_local, tmax_f, tmin_f, wind_max_mph, "
-    "wind_dir_dominant_deg"
+    "wind_dir_dominant_deg, precipitation_mm, wind_gust_max_mph"
 )
 
 _FIRMS_HOTSPOT_SCHEMA = """
@@ -109,6 +116,59 @@ CREATE TABLE IF NOT EXISTS hms_smoke (
 """
 
 _HMS_SMOKE_COLUMNS = "date_local, density, geometry_hash, geometry_json"
+
+_SPECIATION_SCHEMA = """
+CREATE TABLE IF NOT EXISTS speciation (
+    site_id         TEXT NOT NULL,
+    date_local      TEXT NOT NULL,
+    parameter_code  TEXT NOT NULL,
+    parameter_name  TEXT,
+    method_code     TEXT,
+    method_name     TEXT,
+    concentration   REAL,
+    units           TEXT,
+    ingested_at     TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (site_id, date_local, parameter_code)
+)
+"""
+
+_SPECIATION_COLUMNS = (
+    "site_id, date_local, parameter_code, parameter_name, method_code, "
+    "method_name, concentration, units"
+)
+
+# Distinct IMPROVE/CSN speciation sites with coordinates, derived from the SPEC
+# CSV's Latitude/Longitude columns during ingest. The speciation table itself
+# does not store lat/lon (it is keyed on parameter rows), so this small table
+# is what lets ``ingest weather --speciation`` fetch Open-Meteo weather for
+# those sites.
+_SPECIATION_SITES_SCHEMA = """
+CREATE TABLE IF NOT EXISTS speciation_sites (
+    site_id  TEXT PRIMARY KEY,
+    lat      REAL,
+    lon      REAL,
+    ingested_at TEXT NOT NULL DEFAULT (datetime('now'))
+)
+"""
+
+# Daily 850 hPa transport-layer wind (NCEP/NCAR Reanalysis-1, 2.5° grid) per
+# site-day, keyed like weather_daily so re-ingestion is idempotent. ``source``
+# records whether the row came from the daily reanalysis averages
+# ("ncep_daily") or a monthly-mean fallback broadcast to every day of the
+# month ("ncep_monthly").
+_TRANSPORT_WIND_SCHEMA = """
+CREATE TABLE IF NOT EXISTS transport_wind (
+    site_id     TEXT NOT NULL,
+    date_local  TEXT NOT NULL,
+    u850        REAL,
+    v850        REAL,
+    source      TEXT NOT NULL DEFAULT '',
+    ingested_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (site_id, date_local)
+)
+"""
+
+_TRANSPORT_WIND_COLUMNS = "site_id, date_local, u850, v850, source"
 
 _LABELS_SCHEMA = """
 CREATE TABLE IF NOT EXISTS labels (
@@ -168,10 +228,36 @@ class AccuracyStore:
         self._conn.execute(_WEATHER_DAILY_SCHEMA)
         self._conn.execute(_FIRMS_HOTSPOT_SCHEMA)
         self._conn.execute(_HMS_SMOKE_SCHEMA)
+        self._conn.execute(_SPECIATION_SCHEMA)
+        self._conn.execute(_SPECIATION_SITES_SCHEMA)
+        self._conn.execute(_TRANSPORT_WIND_SCHEMA)
         self._conn.execute(_LABELS_SCHEMA)
         self._conn.execute(_PREDICTIONS_SCHEMA)
         self._conn.execute(_INGEST_STATE_SCHEMA)
+        # Pre-existing weather_daily tables (created before the precip/gust
+        # columns shipped) must gain the new columns without dropping rows.
+        self._ensure_weather_daily_columns()
         self._conn.commit()
+
+    def _ensure_weather_daily_columns(self) -> None:
+        """Idempotently add the precipitation/gust columns to an existing
+        ``weather_daily`` table.
+
+        ``CREATE TABLE IF NOT EXISTS`` never alters an existing table, so a
+        store created before the precip/gust columns existed would otherwise
+        stay missing them (and INSERTs would fail). Each ``ALTER TABLE ... ADD
+        COLUMN`` is guarded by a ``PRAGMA table_info`` check so it runs at most
+        once and never touches existing rows.
+        """
+        existing = {
+            row[1] for row in self._conn.execute("PRAGMA table_info(weather_daily)")
+        }
+        for column, ddl in (
+            ("precipitation_mm", "ALTER TABLE weather_daily ADD COLUMN precipitation_mm REAL"),
+            ("wind_gust_max_mph", "ALTER TABLE weather_daily ADD COLUMN wind_gust_max_mph REAL"),
+        ):
+            if column not in existing:
+                self._conn.execute(ddl)
 
     def close(self) -> None:
         self._conn.close()
@@ -323,6 +409,8 @@ class AccuracyStore:
                 r.tmin_f,
                 r.wind_max_mph,
                 r.wind_dir_dominant_deg,
+                r.precipitation_mm,
+                r.wind_gust_max_mph,
             )
             for r in records
         ]
@@ -330,7 +418,7 @@ class AccuracyStore:
             return 0
         self._conn.executemany(
             f"INSERT OR REPLACE INTO weather_daily ({_WEATHER_DAILY_COLUMNS}) "
-            f"VALUES ({', '.join('?' * 8)})",
+            f"VALUES ({', '.join('?' * 10)})",
             rows,
         )
         self._conn.commit()
@@ -360,6 +448,8 @@ class AccuracyStore:
                 tmin_f=row[5],
                 wind_max_mph=row[6],
                 wind_dir_dominant_deg=row[7],
+                precipitation_mm=row[8],
+                wind_gust_max_mph=row[9],
             )
             for row in cursor
         ]
@@ -368,19 +458,46 @@ class AccuracyStore:
         return self._conn.execute("SELECT COUNT(*) FROM weather_daily").fetchone()[0]
 
     def has_weather_coverage(self, site_id: str, start_date: str, end_date: str) -> bool:
-        """True when ``weather_daily`` already has a row for ``site_id`` inside
-        the inclusive ``[start_date, end_date]`` window.
+        """True when ``weather_daily`` already spans the FULL inclusive
+        ``[start_date, end_date]`` window for ``site_id`` — a row at or before
+        ``start_date`` AND a row at or after ``end_date`` — AND every stored row
+        inside the window carries non-null ``precipitation_mm`` and
+        ``wind_gust_max_mph``.
 
         Lets ``ingest_weather_for_sites`` skip finished sites on a resumed run.
+        A site only counts as covered when its stored weather covers the whole
+        window, so a site whose rows merely overlap it (e.g. an earlier
+        backfill that only wrote 2020 rows inside a 2016-2020 window) is
+        re-fetched rather than silently left with a partial range.
+
+        The precip/gust requirement is the Track-B backfill contract: rows
+        written before the precip/gust columns existed carry NULL there, so
+        sites that only have old wind data do NOT count as covered and get
+        re-fetched with the enriched daily variables. A partially-backfilled
+        site (some window days still NULL) is likewise re-fetched.
         ``date_local`` is always stored as ``YYYY-MM-DD`` text, so SQLite's
         lexical collation compares the window bounds correctly.
         """
         row = self._conn.execute(
-            "SELECT 1 FROM weather_daily "
-            "WHERE site_id = ? AND date_local BETWEEN ? AND ? LIMIT 1",
+            "SELECT MIN(date_local), MAX(date_local) FROM weather_daily "
+            "WHERE site_id = ?",
+            (site_id,),
+        ).fetchone()
+        if not (
+            row[0] is not None
+            and row[0] <= start_date
+            and row[1] >= end_date
+        ):
+            return False
+        total, enriched = self._conn.execute(
+            "SELECT COUNT(*), "
+            "SUM(CASE WHEN precipitation_mm IS NOT NULL "
+            "     AND wind_gust_max_mph IS NOT NULL THEN 1 ELSE 0 END) "
+            "FROM weather_daily "
+            "WHERE site_id = ? AND date_local BETWEEN ? AND ?",
             (site_id, start_date, end_date),
         ).fetchone()
-        return row is not None
+        return total is not None and total > 0 and enriched == total
 
     def insert_firms_hotspots(self, records: Iterable[FirmsHotspotRecord]) -> int:
         """Insert FIRMS hotspot records, replacing any row already present under
@@ -515,6 +632,217 @@ class AccuracyStore:
 
     def count_hms_smoke(self) -> int:
         return self._conn.execute("SELECT COUNT(*) FROM hms_smoke").fetchone()[0]
+
+    def insert_speciation(self, records: Iterable[SpeciationRow]) -> int:
+        """Insert speciation rows, replacing any row already present under the
+        natural key (site_id, date_local, parameter_code). Commits once.
+
+        All rows are stored verbatim (audit-complete); the IMPROVE-only filter
+        that label derivation applies lives in ``speclabels``, not here.
+
+        Returns the number of records written.
+        """
+        rows = [
+            (
+                r.site_id,
+                r.date_local,
+                r.parameter_code,
+                r.parameter_name,
+                r.method_code,
+                r.method_name,
+                r.concentration,
+                r.units,
+            )
+            for r in records
+        ]
+        if not rows:
+            return 0
+        self._conn.executemany(
+            f"INSERT OR REPLACE INTO speciation ({_SPECIATION_COLUMNS}) "
+            f"VALUES ({', '.join('?' * 8)})",
+            rows,
+        )
+        self._conn.commit()
+        return len(rows)
+
+    def fetch_speciation(
+        self, site_id: str, date_local: str
+    ) -> Dict[str, float]:
+        """Read a site-day's speciation concentrations as
+        ``parameter_code -> concentration`` (None concentrations are dropped).
+
+        This is the audit-complete row set (every method, including CSN); the
+        IMPROVE filter is applied downstream by ``speclabels.derive_components``
+        via ``fetch_speciation_methods``.
+        """
+        cursor = self._conn.execute(
+            "SELECT parameter_code, concentration FROM speciation "
+            "WHERE site_id = ? AND date_local = ?",
+            (site_id, date_local),
+        )
+        return {
+            parameter_code: concentration
+            for parameter_code, concentration in cursor
+            if concentration is not None
+        }
+
+    def fetch_speciation_methods(
+        self, site_id: str, date_local: str
+    ) -> Dict[str, str]:
+        """Read a site-day's speciation ``parameter_code -> method_name`` map,
+        used to select IMPROVE-network rows for label derivation."""
+        cursor = self._conn.execute(
+            "SELECT parameter_code, method_name FROM speciation "
+            "WHERE site_id = ? AND date_local = ? AND method_name IS NOT NULL",
+            (site_id, date_local),
+        )
+        return dict(cursor)
+
+    def fetch_speciation_join_site_days(self) -> List[Tuple[str, str]]:
+        """Distinct ``(site_id, date_local)`` pairs present in BOTH the
+        ``predictions`` table and the ``speciation`` table, ordered
+        deterministically by ``(site_id, date_local)``.
+
+        This is the population the ``speciate`` report cross-tabs: scorer /
+        rule-derived labels exist only where a prediction was stored, and
+        composition ground truth only where a speciation row was ingested.
+        """
+        cursor = self._conn.execute(
+            "SELECT DISTINCT p.site_id, p.date_local FROM predictions p "
+            "JOIN speciation s ON p.site_id = s.site_id AND p.date_local = s.date_local "
+            "ORDER BY p.site_id, p.date_local"
+        )
+        return [(row[0], row[1]) for row in cursor]
+
+    def count_speciation(self) -> int:
+        return self._conn.execute("SELECT COUNT(*) FROM speciation").fetchone()[0]
+
+    def insert_speciation_sites(
+        self, sites: Iterable[Tuple[str, float, float]]
+    ) -> int:
+        """Insert distinct ``(site_id, lat, lon)`` speciation sites, replacing
+        any row already present under the ``site_id`` primary key. Commits once.
+
+        Called by the speciation ingest to persist site coordinates (the SPEC
+        CSV carries them per row; the ``speciation`` table itself does not).
+
+        Returns the number of site rows written.
+        """
+        rows = [
+            (site_id, lat, lon)
+            for site_id, lat, lon in sites
+            if site_id is not None
+        ]
+        if not rows:
+            return 0
+        self._conn.executemany(
+            "INSERT OR REPLACE INTO speciation_sites (site_id, lat, lon) "
+            "VALUES (?, ?, ?)",
+            rows,
+        )
+        self._conn.commit()
+        return len(rows)
+
+    def fetch_speciation_sites(self) -> List[Tuple[str, float, float]]:
+        """Distinct ``(site_id, lat, lon)`` triples from ``speciation_sites``,
+        ordered by ``site_id``.
+
+        This is the site list ``ingest weather --speciation`` fetches archived
+        weather for. Rows without usable coordinates are excluded.
+        """
+        cursor = self._conn.execute(
+            "SELECT site_id, lat, lon FROM speciation_sites "
+            "WHERE lat IS NOT NULL AND lon IS NOT NULL ORDER BY site_id"
+        )
+        return [(row[0], row[1], row[2]) for row in cursor]
+
+    def insert_transport_wind(self, records: Iterable[TransportWindRecord]) -> int:
+        """Insert daily 850 hPa transport-wind rows, replacing any row already
+        present under the natural key (site_id, date_local). Commits once.
+
+        Returns the number of records written.
+        """
+        rows = [
+            (r.site_id, r.date_local, r.u850, r.v850, r.source)
+            for r in records
+        ]
+        if not rows:
+            return 0
+        self._conn.executemany(
+            f"INSERT OR REPLACE INTO transport_wind ({_TRANSPORT_WIND_COLUMNS}) "
+            f"VALUES ({', '.join('?' * 5)})",
+            rows,
+        )
+        self._conn.commit()
+        return len(rows)
+
+    def fetch_transport_wind(
+        self, site_id: Optional[str] = None
+    ) -> List[TransportWindRecord]:
+        """Read transport_wind rows, optionally filtered to one site, ordered
+        by natural key."""
+        if site_id is None:
+            cursor = self._conn.execute(
+                f"SELECT {_TRANSPORT_WIND_COLUMNS} FROM transport_wind "
+                "ORDER BY site_id, date_local"
+            )
+        else:
+            cursor = self._conn.execute(
+                f"SELECT {_TRANSPORT_WIND_COLUMNS} FROM transport_wind "
+                "WHERE site_id = ? ORDER BY site_id, date_local",
+                (site_id,),
+            )
+        return [
+            TransportWindRecord(
+                site_id=row[0],
+                date_local=row[1],
+                u850=row[2],
+                v850=row[3],
+                source=row[4],
+            )
+            for row in cursor
+        ]
+
+    def count_transport_wind(self) -> int:
+        return self._conn.execute("SELECT COUNT(*) FROM transport_wind").fetchone()[0]
+
+    def has_transport_wind_coverage(
+        self, site_id: str, start_date: str, end_date: str
+    ) -> bool:
+        """True when ``transport_wind`` already spans the FULL inclusive
+        ``[start_date, end_date]`` window for ``site_id`` — a row at or before
+        ``start_date`` AND a row at or after ``end_date`` (same semantics as
+        ``has_weather_coverage``).
+
+        ``date_local`` is always stored as ``YYYY-MM-DD`` text, so SQLite's
+        lexical collation compares the window bounds correctly.
+        """
+        row = self._conn.execute(
+            "SELECT MIN(date_local), MAX(date_local) FROM transport_wind "
+            "WHERE site_id = ?",
+            (site_id,),
+        ).fetchone()
+        return (
+            row[0] is not None
+            and row[0] <= start_date
+            and row[1] >= end_date
+        )
+
+    def fetch_aqs_speciation_site_days(self) -> List[Tuple[str, str]]:
+        """Distinct ``(site_id, date_local)`` pairs present in BOTH the
+        ``aqs_daily`` table and the ``speciation`` table, ordered
+        deterministically by ``(site_id, date_local)``.
+
+        This is the population the PM-scoped ``speciate`` report filters to
+        PM-elevated days: a site-day must carry a stored PM reading (FRM/FEM or
+        non-FRM mass, i.e. 88502) and a speciation composition answer key.
+        """
+        cursor = self._conn.execute(
+            "SELECT DISTINCT a.site_id, a.date_local FROM aqs_daily a "
+            "JOIN speciation s ON a.site_id = s.site_id AND a.date_local = s.date_local "
+            "ORDER BY a.site_id, a.date_local"
+        )
+        return [(row[0], row[1]) for row in cursor]
 
     def insert_labels(self, records: Iterable[LabelRecord]) -> int:
         """Insert derived labels, replacing any row already present under the

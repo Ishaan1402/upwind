@@ -13,6 +13,7 @@ import pytest
 
 from backend.eval.accuracy.__main__ import (
     CONUS_BBOX,
+    _advance_watermark,
     _bbox_type,
     _date_type,
     main,
@@ -71,6 +72,20 @@ def test_watermark_preserves_meta_on_plain_advance(tmp_path):
             "SELECT meta FROM ingest_state WHERE source = 'firms'"
         ).fetchone()
         assert row[0] == '{"bbox": "conus"}'
+    finally:
+        store.close()
+
+
+def test_advance_watermark_max_semantics(tmp_path):
+    store = AccuracyStore(tmp_path / "accuracy.db")
+    try:
+        # No existing watermark: the new end becomes the watermark.
+        assert _advance_watermark(store, "aqs", "2019-12-31") == "2019-12-31"
+        # A newer end advances the watermark.
+        assert _advance_watermark(store, "aqs", "2021-12-31") == "2021-12-31"
+        # An OLDER end must NOT regress the watermark (max semantics).
+        assert _advance_watermark(store, "aqs", "2019-12-31") == "2021-12-31"
+        assert store.get_watermark("aqs") == "2021-12-31"
     finally:
         store.close()
 
@@ -199,6 +214,69 @@ def test_ingest_aqs_cli_parses_years_and_sets_watermark(tmp_path):
         assert store.get_watermark("aqs") == "2021-12-31"
 
 
+def test_ingest_aqs_backfill_older_year_does_not_regress_watermark(tmp_path):
+    db_path = tmp_path / "accuracy.db"
+    with AccuracyStore(db_path) as store:
+        # Newer data (2021) is already stored and the watermark reflects it.
+        store.set_watermark("aqs", "2021-12-31")
+
+    mock_ingest = Mock(return_value=42)
+    with patch("backend.eval.accuracy.__main__.ingest_aqs_year", mock_ingest), \
+         patch("backend.eval.accuracy.__main__.RAW_DATA_DIR", tmp_path / "raw"):
+        rc = main([
+            "ingest", "aqs",
+            "--year", "2019",
+            "--db", str(db_path),
+        ])
+
+    assert rc == 0
+    assert mock_ingest.call_count == 1
+    with AccuracyStore(db_path) as store:
+        # Backfilling an older year must not regress the watermark.
+        assert store.get_watermark("aqs") == "2021-12-31"
+
+
+def test_ingest_speciation_backfill_older_year_does_not_regress_watermark(tmp_path):
+    db_path = tmp_path / "accuracy.db"
+    with AccuracyStore(db_path) as store:
+        store.set_watermark("speciation", "2020-12-31")
+
+    mock_ingest = Mock(return_value=42)
+    with patch("backend.eval.accuracy.__main__.ingest_speciation_year", mock_ingest), \
+         patch("backend.eval.accuracy.__main__.RAW_DATA_DIR", tmp_path / "raw"):
+        rc = main([
+            "ingest", "speciation",
+            "--year", "2019",
+            "--db", str(db_path),
+        ])
+
+    assert rc == 0
+    assert mock_ingest.call_count == 1
+    with AccuracyStore(db_path) as store:
+        assert store.get_watermark("speciation") == "2020-12-31"
+
+
+def test_ingest_speciation_cli_sets_watermark(tmp_path):
+    db_path = tmp_path / "accuracy.db"
+    with AccuracyStore(db_path):
+        pass  # create the schema
+
+    mock_ingest = Mock(return_value=42)
+    with patch("backend.eval.accuracy.__main__.ingest_speciation_year", mock_ingest), \
+         patch("backend.eval.accuracy.__main__.RAW_DATA_DIR", tmp_path / "raw"):
+        rc = main([
+            "ingest", "speciation",
+            "--year", "2020",
+            "--db", str(db_path),
+        ])
+
+    assert rc == 0
+    assert mock_ingest.call_args.args[0] == 2020
+    assert mock_ingest.call_args.args[2] == tmp_path / "raw" / "speciation" / "2020"
+    with AccuracyStore(db_path) as store:
+        assert store.get_watermark("speciation") == "2020-12-31"
+
+
 def test_ingest_aqs_cli_accepts_retry_failed(tmp_path):
     db_path = tmp_path / "accuracy.db"
     with AccuracyStore(db_path):
@@ -244,6 +322,53 @@ def test_ingest_firms_cli_parses_bbox_and_defaults_to_conus(tmp_path):
         assert store.get_watermark("firms") == "2023-07-03"
 
 
+@pytest.mark.parametrize(
+    "source,pre_existing,patched,args",
+    [
+        # weather: older fixed-range backfill after a newer watermark.
+        (
+            "weather",
+            "2021-02-28",
+            "backend.eval.accuracy.__main__.ingest_weather_for_sites",
+            ["ingest", "weather", "--start", "2016-01-01", "--end", "2016-12-31"],
+        ),
+        # hms: older fixed-range backfill after a newer watermark.
+        (
+            "hms",
+            "2021-02-28",
+            "backend.eval.accuracy.__main__.ingest_hms_smoke_range",
+            ["ingest", "hms", "--start", "2016-01-01", "--end", "2016-12-31"],
+        ),
+        # firms: older fixed-range backfill after a newer watermark.
+        (
+            "firms",
+            "2021-02-28",
+            "backend.eval.accuracy.__main__.ingest_firms_historical",
+            ["ingest", "firms", "--start", "2016-01-01", "--end", "2016-12-31"],
+        ),
+    ],
+)
+def test_ingest_backfill_older_range_does_not_regress_watermark(
+    tmp_path, source, pre_existing, patched, args
+):
+    db_path = tmp_path / "accuracy.db"
+    with AccuracyStore(db_path) as store:
+        store.set_watermark(source, pre_existing)
+        # weather derives its site list from the AQS store.
+        store.insert_aqs_daily([_aqs_record("06-037-0002", "2020-07-01", 40.0, -120.0)])
+
+    mock_ingest = Mock(return_value=5)
+    with patch(patched, mock_ingest), \
+         patch("backend.eval.accuracy.__main__.RAW_DATA_DIR", tmp_path / "raw"):
+        rc = main([*args, "--db", str(db_path)])
+
+    assert rc == 0
+    assert mock_ingest.call_count == 1
+    with AccuracyStore(db_path) as store:
+        # The older range must not regress the source's watermark.
+        assert store.get_watermark(source) == pre_existing
+
+
 def test_status_cli_reports_watermarks_counts_and_bounds(tmp_path, capsys):
     db_path = tmp_path / "accuracy.db"
     with AccuracyStore(db_path) as store:
@@ -272,10 +397,11 @@ def test_status_reports_empty_store(tmp_path):
     res = status_command(str(db_path))
     assert res["watermarks"] == {
         "aqs": None, "weather": None, "hms": None, "firms": None,
+        "speciation": None,
     }
     assert res["row_counts"] == {
         "aqs_daily": 0, "weather_daily": 0, "hms_smoke": 0,
-        "firms_hotspots": 0, "labels": 0, "predictions": 0,
+        "firms_hotspots": 0, "speciation": 0, "labels": 0, "predictions": 0,
     }
     assert res["aqs_date_bounds"] is None
 
@@ -342,6 +468,69 @@ def test_ingest_all_runs_every_source_and_sets_watermarks(tmp_path):
         assert store.get_watermark("weather") == "2023-07-03"
         assert store.get_watermark("hms") == "2023-07-03"
         assert store.get_watermark("firms") == "2023-07-03"
+
+
+def test_ingest_weather_speciation_backfills_speciation_sites(tmp_path, capsys):
+    db_path = tmp_path / "accuracy.db"
+    with AccuracyStore(db_path) as store:
+        store.insert_speciation_sites([
+            ("06-037-1003", 33.9372, -118.1919),
+            ("35-013-0002", 36.2664, -115.2201),
+        ])
+
+    mock_ingest = Mock(return_value=366)
+    with patch("backend.eval.accuracy.__main__.ingest_weather_for_sites", mock_ingest):
+        rc = main([
+            "ingest", "weather", "--speciation",
+            "--start", "2020-06-01", "--end", "2020-09-30",
+            "--db", str(db_path),
+        ])
+
+    assert rc == 0
+    # The site list comes from speciation_sites (IMPROVE sites), not aqs_daily.
+    assert mock_ingest.call_args[0][0] == [
+        ("06-037-1003", 33.9372, -118.1919),
+        ("35-013-0002", 36.2664, -115.2201),
+    ]
+    assert mock_ingest.call_args[0][1] == "2020-06-01"
+    assert mock_ingest.call_args[0][2] == "2020-09-30"
+    # The AQS-site weather watermark must not be advanced by a speciation-only
+    # backfill (a later incremental AQS-site run would otherwise skip the range).
+    with AccuracyStore(db_path) as store:
+        assert store.get_watermark("weather") is None
+    assert "speciation sites" in capsys.readouterr().out
+
+
+def test_ingest_weather_speciation_rejects_incremental(tmp_path):
+    db_path = tmp_path / "accuracy.db"
+    with AccuracyStore(db_path):
+        pass
+    rc = main([
+        "ingest", "weather", "--speciation", "--incremental", "--db", str(db_path),
+    ])
+    assert rc == 2
+
+
+def test_ingest_weather_speciation_requires_sites_and_dates(tmp_path, capsys):
+    db_path = tmp_path / "accuracy.db"
+    with AccuracyStore(db_path):
+        pass
+
+    # No speciation sites ingested yet.
+    rc = main([
+        "ingest", "weather", "--speciation",
+        "--start", "2020-06-01", "--end", "2020-09-30",
+        "--db", str(db_path),
+    ])
+    assert rc == 1
+    assert "no speciation sites" in capsys.readouterr().out
+
+    # --start/--end are mandatory for the speciation backfill.
+    with AccuracyStore(db_path) as store:
+        store.insert_speciation_sites([("06-037-1003", 33.9372, -118.1919)])
+    rc = main(["ingest", "weather", "--speciation", "--db", str(db_path)])
+    assert rc == 2
+    assert "requires --start and --end" in capsys.readouterr().out
 
 
 def test_ingest_hms_incremental_advances_watermark(tmp_path):

@@ -9,14 +9,29 @@ Subcommands:
   report  recompute the metrics summary over stored predictions
   label   compute ground-truth labels only (no scoring) and print the
           per-class distribution — a quick sanity check before a full run
-  ingest  ingest historical raw data for a source (aqs/weather/hms/firms/all).
-          Idempotent (INSERT OR REPLACE + skip-already-downloaded), resumable
-          (per-source watermarks + per-step failure collection), and bbox-
-          scoped; downloads land under ``RAW_DATA_DIR/<source>/<year>/``
+  ingest  ingest historical raw data for a source
+          (aqs/weather/hms/firms/speciation/all). Idempotent (INSERT OR
+          REPLACE + skip-already-downloaded), resumable (per-source
+          watermarks + per-step failure collection), and bbox-scoped;
+          downloads land under ``RAW_DATA_DIR/<source>/<year>/``
   status  print per-source ingest watermarks, table row counts, and the
           min/max date in aqs_daily
+  speciate  cross-tab IMPROVE-speciation composition labels (answer key)
+            against the stored rule-derived and scorer labels
+  specbench  multi-year smoke-vs-dust ablation benchmark: does severity or a
+            source feature drive smoke-vs-dust performance across years
+            (leave-year-out, region-season holdout, severity strata,
+            severity-matched subset, abstention curve)
   tune    Phase-2 coordinate search: sweep scorer thresholds over the site-
           level VAL holdout against frozen labels and print a ranked table
+
+The ``speciate`` cross-tab validates the product's causal EVENT hypotheses
+(``wildfire_smoke``, ``windblown_dust``) against COMPOSITION classes derived
+from IMPROVE chemistry (``biomass_smoke``, ``mineral_dust``, ``mixed``). The
+answer key says what the PM is MADE OF, not which event produced it; the
+``SPECIATION_TO_PRODUCT`` mapping below documents how each composition class
+relates to the product hypotheses. ``ozone_episode``, ``winter_stagnation``,
+and ``urban_industrial_pm`` are NOT composition-validated by this key.
 """
 
 import argparse
@@ -25,19 +40,27 @@ import sys
 from datetime import date, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
+from backend.engine.params import LABEL_PARAMS
 from backend.eval.accuracy import RAW_DATA_DIR
 from backend.eval.accuracy.ingest.aqs import ingest_aqs_year
 from backend.eval.accuracy.ingest.firms_historical import ingest_firms_historical
 from backend.eval.accuracy.ingest.hms import ingest_hms_smoke_range
+from backend.eval.accuracy.ingest.speciation import ingest_speciation_year
 from backend.eval.accuracy.ingest.weather import ingest_weather_for_sites
-from backend.eval.accuracy.labels import LABEL_CLASSES
+from backend.eval.accuracy.labels import LABEL_CLASSES, build_observation
 from backend.eval.accuracy.metrics import compute_metrics
+from backend.eval.accuracy.reconstruct import score_sample
 from backend.eval.accuracy.runner import (
     PROGRESS_INTERVAL,
     build_samples,
     filter_sites_by_bbox,
     label_sample,
     run_accuracy_eval,
+)
+from backend.eval.accuracy.speclabels import (
+    SPECIATION_CLASSES,
+    classify_speciation,
+    derive_components,
 )
 from backend.eval.accuracy.store import ACCURACY_DB_PATH, AccuracyStore
 from backend.eval.accuracy.tune import PHASE2_GRID, run_tune
@@ -53,11 +76,33 @@ _CONFUSION_ABBREV = {
     "ambiguous": "ambig",
 }
 
+# Composition class (speciation answer key) -> the product hypothesis
+# (LABEL_CLASSES id) whose causal event that composition can validate.
+# Chemistry only says what the PM is MADE OF, so this map is where the
+# composition vocabulary meets the product's event vocabulary:
+#   biomass_smoke validates wildfire_smoke (biomass-combustion contribution;
+#     wildfire smoke but also wood heating / ag burning, so it can only ever
+#     support, never prove, the event hypothesis).
+#   mineral_dust validates windblown_dust (fine-soil elements dominate; could
+#     be windblown dust, road dust, construction, or resuspended soil).
+#   mixed validates NEITHER pure claim: both biomass and mineral signatures
+#     are elevated, so it is reported separately, never forced into either.
+#   secondary_aerosol and ambiguous validate no product hypothesis here.
+# ozone_episode / winter_stagnation / urban_industrial_pm are NOT
+# composition-validated by this key (no composition class maps to them).
+SPECIATION_TO_PRODUCT = {
+    "biomass_smoke": "wildfire_smoke",
+    "mineral_dust": "windblown_dust",
+    "mixed": None,
+    "secondary_aerosol": None,
+    "ambiguous": None,
+}
+
 # Default FIRMS bbox: the contiguous US.
 CONUS_BBOX = (-125.0, 24.0, -66.0, 50.0)
 
 # Watermark source names (the `source` column of the ingest_state table).
-_INGEST_SOURCES = ("aqs", "weather", "hms", "firms")
+_INGEST_SOURCES = ("aqs", "weather", "hms", "firms", "speciation")
 
 # Rolling-job lookback when a source has no watermark yet.
 _INITIAL_HMS_LOOKBACK_DAYS = 30
@@ -130,6 +175,171 @@ def report_command(db_path: str) -> Dict[str, Any]:
             (p.true_label, p.predicted_label) for p in predictions
         )
         return {"metrics": metrics, "samples": len(predictions)}
+
+
+def speciate_command(db_path: str) -> Dict[str, Any]:
+    """Cross-tab IMPROVE-speciation composition labels against the stored
+    rule-derived and scorer labels.
+
+    For every ``(site_id, date_local)`` present in BOTH ``predictions`` and
+    ``speciation``: derive the composition components from IMPROVE rows only
+    (``speclabels.derive_components``), classify them
+    (``speclabels.classify_speciation``), and compare against the stored
+    ``true_label`` (rule-derived) and ``predicted_label`` (scorer).
+
+    The speciation classes are COMPOSITION classes (what the PM is made of),
+    not causal events; see ``SPECIATION_TO_PRODUCT`` for which product
+    hypothesis each class validates. ``mixed`` days (both biomass and mineral
+    signatures elevated) validate neither the pure-smoke nor the pure-dust
+    claim and are reported separately. ``ozone_episode``, ``winter_stagnation``,
+    and ``urban_industrial_pm`` are NOT composition-validated by this key.
+
+    Returns a plain dict (printing is left to the CLI):
+        joinable:       total site-days in both tables.
+        elevated:       joinable site-days whose rule true_label is neither
+                        ``clean`` nor ``ambiguous``.
+        spec_distribution: speciation class -> count.
+        crosstab_rule:  speciation class -> {rule true_label -> count}.
+        crosstab_scorer: speciation class -> {scorer predicted_label -> count}.
+        smoke_dust_scorer: smoke-vs-dust axis of the scorer cross-tab.
+        smoke_dust_rule:   smoke-vs-dust axis of the rule-label cross-tab.
+    """
+    with AccuracyStore(db_path) as store:
+        predictions = store.fetch_predictions()
+        pred_by_key = {(p.site_id, p.date_local): p for p in predictions}
+        joinable = store.fetch_speciation_join_site_days()
+
+        crosstab_rule: Dict[str, Dict[str, int]] = {
+            cls: {label: 0 for label in LABEL_CLASSES} for cls in SPECIATION_CLASSES
+        }
+        crosstab_scorer: Dict[str, Dict[str, int]] = {
+            cls: {label: 0 for label in LABEL_CLASSES} for cls in SPECIATION_CLASSES
+        }
+        spec_distribution: Dict[str, int] = {cls: 0 for cls in SPECIATION_CLASSES}
+        elevated = 0
+
+        for site_id, date_local in joinable:
+            pred = pred_by_key.get((site_id, date_local))
+            if pred is None:
+                continue
+            components = derive_components(
+                store.fetch_speciation(site_id, date_local),
+                store.fetch_speciation_methods(site_id, date_local),
+            )
+            is_elevated = pred.true_label not in ("clean", "ambiguous")
+            if is_elevated:
+                elevated += 1
+            spec_label = classify_speciation(components, elevated=is_elevated)
+
+            spec_distribution[spec_label] += 1
+            crosstab_rule[spec_label][pred.true_label] += 1
+            crosstab_scorer[spec_label][pred.predicted_label] += 1
+
+    def _axis(crosstab: Dict[str, Dict[str, int]]) -> Dict[str, int]:
+        return {
+            "speciation_dust_called_smoke": crosstab["mineral_dust"]["wildfire_smoke"],
+            "speciation_smoke_called_dust": crosstab["biomass_smoke"]["windblown_dust"],
+            "mixed_called_smoke": crosstab["mixed"]["wildfire_smoke"],
+            "mixed_called_dust": crosstab["mixed"]["windblown_dust"],
+        }
+
+    return {
+        "joinable": len(joinable),
+        "elevated": elevated,
+        "spec_distribution": spec_distribution,
+        "crosstab_rule": crosstab_rule,
+        "crosstab_scorer": crosstab_scorer,
+        "smoke_dust_rule": _axis(crosstab_rule),
+        "smoke_dust_scorer": _axis(crosstab_scorer),
+    }
+
+
+def speciate_pm_command(db_path: str) -> Dict[str, Any]:
+    """PM-scoped speciation cross-tab with ON-THE-FLY production scoring.
+
+    Extends ``speciate`` to the IMPROVE sites that only recently gained PM
+    input (non-FRM 88502 mass) and weather: it starts from every site-day
+    present in BOTH ``aqs_daily`` and ``speciation``, keeps only PM-elevated
+    days (PM2.5 AQI > 50 OR PM10 AQI > 50), derives the speciation composition
+    label (``speclabels``), and scores the day fresh with the production scorer
+    (``reconstruct.score_sample``, the same path ``run_accuracy_eval`` uses) so
+    the scorer sees PM mass + weather + FIRMS/HMS. Stored predictions are not
+    used (they may predate the 88502/weather backfill) and are not written.
+
+    The speciation classes are COMPOSITION classes; see ``SPECIATION_TO_PRODUCT``
+    for which product hypothesis each validates. ``mixed`` days validate neither
+    pure claim and are reported separately. ``ozone_episode``,
+    ``winter_stagnation``, and ``urban_industrial_pm`` are NOT
+    composition-validated by this key.
+
+    Returns a plain dict (printing is left to the CLI):
+        pm_elevated:       PM-elevated site-day count (the sample size).
+        spec_distribution: speciation class -> count over PM-elevated days.
+        crosstab_scorer:   speciation class -> {scorer predicted_label -> count}.
+        smoke_dust:        the smoke/dust headline: biomass_smoke days the
+                           scorer calls wildfire_smoke, mineral_dust days it
+                           calls windblown_dust, the two cross-errors, and the
+                           mixed days (reported separately).
+    """
+    with AccuracyStore(db_path) as store:
+        crosstab_scorer: Dict[str, Dict[str, int]] = {
+            cls: {label: 0 for label in LABEL_CLASSES} for cls in SPECIATION_CLASSES
+        }
+        spec_distribution: Dict[str, int] = {cls: 0 for cls in SPECIATION_CLASSES}
+        pm_elevated = 0
+
+        for site_id, date_local in store.fetch_aqs_speciation_site_days():
+            observation = build_observation(
+                store.fetch_aqs_daily(site_id=site_id, date_local=date_local)
+            )
+            # PM elevation: either PM2.5 or PM10 daily AQI above the elevated
+            # threshold (build_observation only records non-null AQIs).
+            pm25_aqi = observation.pollutant_aqi.get("PM2.5", 0)
+            pm10_aqi = observation.pollutant_aqi.get("PM10", 0)
+            if pm25_aqi <= LABEL_PARAMS.aqi_elevated and pm10_aqi <= LABEL_PARAMS.aqi_elevated:
+                continue
+            pm_elevated += 1
+
+            components = derive_components(
+                store.fetch_speciation(site_id, date_local),
+                store.fetch_speciation_methods(site_id, date_local),
+            )
+            spec_label = classify_speciation(components, elevated=True)
+            spec_distribution[spec_label] += 1
+
+            observation_dict, hypotheses, _ = score_sample(store, site_id, date_local)
+            if hypotheses:
+                predicted_label = hypotheses[0]["id"]
+            else:
+                # The scorer could not commit to any cause; record as ambiguous
+                # (mirrors run_accuracy_eval).
+                predicted_label = "ambiguous"
+            # Clean mapping identical to run_accuracy_eval: a non-elevated-AQI
+            # day is clean regardless of the top hypothesis (never fires for
+            # the PM-elevated set, kept for definitional consistency).
+            if (
+                observation_dict.get("aqi") is not None
+                and observation_dict["aqi"] <= LABEL_PARAMS.aqi_elevated
+            ):
+                predicted_label = "clean"
+            crosstab_scorer[spec_label][predicted_label] += 1
+
+    return {
+        "pm_elevated": pm_elevated,
+        "spec_distribution": spec_distribution,
+        "crosstab_scorer": crosstab_scorer,
+        "smoke_dust": {
+            "smoke_smoke": crosstab_scorer["biomass_smoke"]["wildfire_smoke"],
+            "dust_dust": crosstab_scorer["mineral_dust"]["windblown_dust"],
+            "dust_smoke": crosstab_scorer["mineral_dust"]["wildfire_smoke"],
+            "smoke_dust": crosstab_scorer["biomass_smoke"]["windblown_dust"],
+            "mixed": {
+                "days": sum(crosstab_scorer["mixed"].values()),
+                "called_smoke": crosstab_scorer["mixed"]["wildfire_smoke"],
+                "called_dust": crosstab_scorer["mixed"]["windblown_dust"],
+            },
+        },
+    }
 
 
 def label_command(
@@ -280,6 +490,22 @@ def _weather_incremental_window(db_path: str) -> Tuple[str, str]:
     return (min(start, end), end)
 
 
+def _advance_watermark(store: AccuracyStore, source: str, new_end: str) -> str:
+    """Advance ``source``'s watermark to ``max(existing, new_end)``.
+
+    Watermarks must never move backwards: ingesting an OLDER historical range
+    on top of newer stored data (e.g. backfilling AQS 2016-2019 after 2020-2021
+    rows are already present) must not regress the source's last-ingested
+    date, or the next ``--incremental`` run would re-ingest the newer data.
+    ``date_local`` is always stored as ``YYYY-MM-DD`` text, so lexical
+    ordering compares the dates correctly. Returns the resulting watermark.
+    """
+    existing = store.get_watermark(source)
+    last_date = new_end if existing is None else max(existing, new_end)
+    store.set_watermark(source, last_date)
+    return last_date
+
+
 def _ingest_aqs(args) -> int:
     """Ingest AQS daily summaries per year (idempotent; already-downloaded
     zips are skipped). Year-granular, so ``--incremental`` is a no-op."""
@@ -299,7 +525,7 @@ def _ingest_aqs(args) -> int:
             try:
                 out_dir = RAW_DATA_DIR / "aqs" / str(year)
                 count = ingest_aqs_year(year, store, out_dir)
-                store.set_watermark("aqs", f"{year}-12-31")
+                _advance_watermark(store, "aqs", f"{year}-12-31")
                 print(f"aqs {year}: ingested {count} record(s) -> {out_dir}")
             except Exception as exc:  # keep going: a bad year must not block the rest
                 print(f"aqs {year}: FAILED: {exc}", file=sys.stderr)
@@ -310,10 +536,95 @@ def _ingest_aqs(args) -> int:
     return 0
 
 
+def _ingest_speciation(args) -> int:
+    """Ingest EPA AirData PM2.5 speciation for a single --year (idempotent;
+    already-downloaded zips are skipped). Year-granular, so ``--incremental``
+    is a no-op."""
+    if args.incremental:
+        print(
+            "speciation --incremental is a no-op: speciation is year-granular. "
+            "Pass --year to ingest; re-running a year is idempotent."
+        )
+        return 0
+    years = sorted(set(args.year + (args.years or [])))
+    if not years:
+        print("error: 'ingest speciation' requires --year YYYY")
+        return 2
+    if len(years) > 1:
+        print(f"note: speciation ingests one year at a time; using {years[0]}")
+    year = years[0]
+    with AccuracyStore(args.db) as store:
+        try:
+            out_dir = RAW_DATA_DIR / "speciation" / str(year)
+            count = ingest_speciation_year(year, store, out_dir)
+            _advance_watermark(store, "speciation", f"{year}-12-31")
+            print(f"speciation {year}: ingested {count} record(s) -> {out_dir}")
+        except Exception as exc:
+            print(f"speciation {year}: FAILED: {exc}", file=sys.stderr)
+            return 1
+    return 0
+
+
 def _ingest_weather(args) -> int:
     """Ingest Open-Meteo daily weather for every AQS site (optionally bbox-
     scoped). The site list is derived from the AQS store, so AQS must be
-    ingested first."""
+    ingested first.
+
+    With ``--speciation`` the site list comes from the ``speciation_sites``
+    table instead (distinct IMPROVE/CSN speciation sites with their SPEC-CSV
+    coordinates), so weather can be backfilled for sites that never appear in
+    the AQS daily summaries (e.g. IMPROVE speciation sites reporting PM2.5
+    mass under the non-FRM 88502 code). This is a fixed-range backfill, so
+    ``--incremental`` is rejected and the ``weather`` watermark is left
+    untouched (advancing it would make a later incremental AQS-site run skip
+    the range).
+    """
+    if args.speciation:
+        if args.incremental:
+            print(
+                "error: 'ingest weather --speciation' is a fixed-range backfill; "
+                "pass --start and --end"
+            )
+            return 2
+        start, end = args.start, args.end
+        if start is None or end is None:
+            print(
+                "error: 'ingest weather --speciation' requires --start and --end"
+            )
+            return 2
+        with AccuracyStore(args.db) as store:
+            sites = store.fetch_speciation_sites()
+            if not sites:
+                print(
+                    "error: no speciation sites in the store — ingest "
+                    "speciation first "
+                    "(e.g. 'python -m backend.eval.accuracy ingest speciation "
+                    "--year 2020')"
+                )
+                return 1
+            sites = filter_sites_by_bbox(sites, args.bbox)
+            if not sites:
+                print(f"error: no speciation sites inside bbox {args.bbox}")
+                return 1
+            try:
+                total = ingest_weather_for_sites(
+                    sites,
+                    start,
+                    end,
+                    store,
+                    skip_existing=True,
+                    workers=args.workers,
+                )
+            except Exception as exc:
+                print(f"weather [{start}..{end}]: FAILED: {exc}", file=sys.stderr)
+                print(f"failed: ['weather: {exc}']")
+                return 1
+        print(
+            f"weather (speciation sites) [{start}..{end}]: ingested {total} "
+            f"record(s) across {len(sites)} site(s)"
+        )
+        return 0
+
     if args.incremental:
         start, end = _weather_incremental_window(args.db)
     else:
@@ -346,7 +657,7 @@ def _ingest_weather(args) -> int:
             print(f"weather [{start}..{end}]: FAILED: {exc}", file=sys.stderr)
             print(f"failed: ['weather: {exc}']")
             return 1
-        store.set_watermark("weather", end)
+        _advance_watermark(store, "weather", end)
     print(
         f"weather [{start}..{end}]: ingested {total} record(s) "
         f"across {len(sites)} site(s)"
@@ -378,7 +689,7 @@ def _ingest_hms(args) -> int:
         # Only advance the watermark when the whole range succeeded, so a
         # failed tail is retried by the next (incremental) run.
         if not failures:
-            store.set_watermark("hms", end)
+            _advance_watermark(store, "hms", end)
     if failures:
         print(f"failed: {failures}")
         return 1
@@ -405,7 +716,7 @@ def _ingest_firms(args) -> int:
             print(f"firms [{start}..{end}]: FAILED: {exc}", file=sys.stderr)
             print(f"failed: ['firms: {exc}']")
             return 1
-        store.set_watermark("firms", end)
+        _advance_watermark(store, "firms", end)
     print(f"firms [{start}..{end}]: ingested {count} record(s)")
     return 0
 
@@ -437,6 +748,7 @@ def ingest_command(args) -> int:
         "weather": _ingest_weather,
         "hms": _ingest_hms,
         "firms": _ingest_firms,
+        "speciation": _ingest_speciation,
         "all": _ingest_all,
     }
     return handlers[args.source](args)
@@ -459,6 +771,7 @@ def status_command(db_path: str) -> Dict[str, Any]:
             "weather_daily": store.count_weather_daily(),
             "hms_smoke": store.count_hms_smoke(),
             "firms_hotspots": store.count_firms_hotspots(),
+            "speciation": store.count_speciation(),
             "labels": store.count_labels(),
             "predictions": store.count_predictions(),
         }
@@ -507,10 +820,95 @@ def _print_metrics(metrics: Dict[str, Any]) -> None:
             print(f"  - {note}")
 
 
+# Compact column labels for the speciation cross-tabs.
+_SPECIATION_ABBREV = {
+    "biomass_smoke": "smoke",
+    "mineral_dust": "dust",
+    "mixed": "mixed",
+    "secondary_aerosol": "second",
+    "ambiguous": "ambig",
+}
+
+
+def _print_speciate_crosstab(crosstab: Dict[str, Dict[str, int]]) -> None:
+    """Print a speciation (rows) x label-class (cols) count table."""
+    headers = [_CONFUSION_ABBREV[label] for label in LABEL_CLASSES]
+    width = max(len(h) for h in headers) + 2
+    print(f"{'spec\\label':<12}" + "".join(f"{h:>{width}}" for h in headers))
+    for spec_class in SPECIATION_CLASSES:
+        row = crosstab.get(spec_class, {})
+        counts = [row.get(label, 0) for label in LABEL_CLASSES]
+        print(
+            f"{_SPECIATION_ABBREV[spec_class]:<12}"
+            + "".join(f"{c:>{width}}" for c in counts)
+        )
+
+
+def _print_speciate(result: Dict[str, Any]) -> None:
+    """Print the speciation cross-tab report (see ``speciate_command``)."""
+    print(f"joinable site-days (predictions x speciation): {result['joinable']}")
+    print(f"  elevated (rule true_label not clean/ambiguous): {result['elevated']}")
+    print(f"  non-elevated: {result['joinable'] - result['elevated']}")
+
+    print("\nspeciation COMPOSITION distribution (IMPROVE chemistry, answer key):")
+    for spec_class in SPECIATION_CLASSES:
+        print(f"  {spec_class:<18} {result['spec_distribution'].get(spec_class, 0)}")
+
+    print("\ncross-tab: speciation composition (rows) x rule true_label (cols):")
+    _print_speciate_crosstab(result["crosstab_rule"])
+    print("\ncross-tab: speciation composition (rows) x scorer predicted_label (cols):")
+    _print_speciate_crosstab(result["crosstab_scorer"])
+
+    rule = result["smoke_dust_rule"]
+    scorer = result["smoke_dust_scorer"]
+    print("\nsmoke-vs-dust axis (speciation composition x rule label):")
+    print(f"  mineral-dust days the RULE calls wildfire_smoke:  {rule['speciation_dust_called_smoke']}")
+    print(f"  biomass-smoke days the RULE calls windblown_dust: {rule['speciation_smoke_called_dust']}")
+    print(f"  mixed days the RULE calls wildfire_smoke/windblown_dust: "
+          f"{rule['mixed_called_smoke']}/{rule['mixed_called_dust']}")
+    print("smoke-vs-dust axis (speciation composition x scorer prediction):")
+    print(f"  mineral-dust days the SCORER calls wildfire_smoke:  {scorer['speciation_dust_called_smoke']}")
+    print(f"  biomass-smoke days the SCORER calls windblown_dust: {scorer['speciation_smoke_called_dust']}")
+    print(f"  mixed days the SCORER calls wildfire_smoke/windblown_dust: "
+          f"{scorer['mixed_called_smoke']}/{scorer['mixed_called_dust']}")
+    print("note: ozone_episode / winter_stagnation / urban_industrial_pm are NOT")
+    print("  composition-validated by this answer key (no composition class maps to them).")
+
+
+def _print_speciate_pm(result: Dict[str, Any]) -> None:
+    """Print the PM-scoped speciation report (see ``speciate_pm_command``)."""
+    print(
+        f"PM-elevated IMPROVE site-days (PM2.5 AQI > 50 OR PM10 AQI > 50): "
+        f"{result['pm_elevated']}"
+    )
+
+    print("\nspeciation COMPOSITION distribution (PM-elevated days, answer key):")
+    for spec_class in SPECIATION_CLASSES:
+        print(f"  {spec_class:<18} {result['spec_distribution'].get(spec_class, 0)}")
+
+    print("\ncross-tab: speciation composition (rows) x scorer predicted_label "
+          "(cols, scored fresh from archive):")
+    _print_speciate_crosstab(result["crosstab_scorer"])
+
+    sd = result["smoke_dust"]
+    print("\nsmoke-vs-dust axis (speciation composition x fresh scorer prediction):")
+    print(f"  biomass-smoke days the SCORER calls wildfire_smoke: {sd['smoke_smoke']}")
+    print(f"  mineral-dust days the SCORER calls windblown_dust:   {sd['dust_dust']}")
+    print(f"  mineral-dust days the SCORER calls wildfire_smoke:   {sd['dust_smoke']}")
+    print(f"  biomass-smoke days the SCORER calls windblown_dust:  {sd['smoke_dust']}")
+    mixed = sd["mixed"]
+    print(f"  mixed days (both signatures elevated; reported separately, "
+          f"never forced into either): {mixed['days']}")
+    print(f"    ... the SCORER calls wildfire_smoke: {mixed['called_smoke']}")
+    print(f"    ... the SCORER calls windblown_dust: {mixed['called_dust']}")
+    print("note: ozone_episode / winter_stagnation / urban_industrial_pm are NOT")
+    print("  composition-validated by this answer key (no composition class maps to them).")
+
+
 def _add_ingest_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "source",
-        choices=["aqs", "weather", "hms", "firms", "all"],
+        choices=["aqs", "weather", "hms", "firms", "speciation", "all"],
         help="data source to ingest",
     )
     parser.add_argument(
@@ -533,6 +931,13 @@ def _add_ingest_args(parser: argparse.ArgumentParser) -> None:
         "--bbox", type=_bbox_type, default=None,
         help="bounding box west,south,east,north (weather/firms/all; "
              "firms defaults to CONUS)",
+    )
+    parser.add_argument(
+        "--speciation", action="store_true",
+        help="weather only: backfill archived weather for IMPROVE/CSN "
+             "speciation sites (from the speciation_sites table) instead of "
+             "AQS sites; requires --start/--end and does not touch the weather "
+             "watermark",
     )
     parser.add_argument(
         "--incremental", action="store_true",
@@ -646,6 +1051,28 @@ def main(argv: Optional[List[str]] = None) -> int:
     )
     _add_db_arg(status_parser)
 
+    speciate_parser = subparsers.add_parser(
+        "speciate",
+        help="cross-tab IMPROVE-speciation labels vs stored rule/scorer labels "
+             "(--scored: PM-scoped cross-tab scored fresh from the archive)",
+    )
+    speciate_parser.add_argument(
+        "--scored", action="store_true",
+        help="PM-scoped cross-tab: for PM-elevated IMPROVE site-days (PM2.5 or "
+             "PM10 AQI > 50) derive the speciation answer key and score the day "
+             "fresh with the production scorer instead of using stored "
+             "predictions",
+    )
+    _add_db_arg(speciate_parser)
+
+    specbench_parser = subparsers.add_parser(
+        "specbench",
+        help="multi-year smoke-vs-dust ablation benchmark (severity vs source "
+             "signal): leave-year-out, region-season holdout, severity strata, "
+             "severity-matched subset, abstention curve",
+    )
+    _add_db_arg(specbench_parser)
+
     args = parser.parse_args(argv)
 
     if args.command == "run":
@@ -688,6 +1115,17 @@ def main(argv: Optional[List[str]] = None) -> int:
         return ingest_command(args)
     elif args.command == "status":
         _print_status(status_command(args.db))
+    elif args.command == "speciate":
+        if getattr(args, "scored", False):
+            _print_speciate_pm(speciate_pm_command(args.db))
+        else:
+            _print_speciate(speciate_command(args.db))
+    elif args.command == "specbench":
+        # Imported here so the accuracy CLI stays importable even if numpy or
+        # the benchmark's heavier imports are unavailable.
+        from backend.eval.accuracy.specbench import specbench_command
+
+        print(specbench_command(args.db))
     return 0
 
 

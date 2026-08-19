@@ -20,7 +20,11 @@ from backend.eval.accuracy.ingest.weather import (
     fetch_weather_daily,
     ingest_weather_for_sites,
 )
-from backend.eval.accuracy.records import FirmsHotspotRecord, WeatherDailyRecord
+from backend.eval.accuracy.records import (
+    FirmsHotspotRecord,
+    TransportWindRecord,
+    WeatherDailyRecord,
+)
 from backend.eval.accuracy.store import AccuracyStore
 
 # --------------------------------------------------------------------------
@@ -71,6 +75,8 @@ WEATHER_FIXTURE_JSON = {
         "temperature_2m_min": "°F",
         "wind_speed_10m_max": "mph",
         "wind_direction_10m_dominant": "°",
+        "precipitation_sum": "mm",
+        "wind_gusts_10m_max": "mph",
     },
     "daily": {
         "time": ["2023-07-01", "2023-07-02"],
@@ -78,6 +84,8 @@ WEATHER_FIXTURE_JSON = {
         "temperature_2m_min": [66.2, 64.8],
         "wind_speed_10m_max": [18.7, None],
         "wind_direction_10m_dominant": [245, 230],
+        "precipitation_sum": [0.25, None],
+        "wind_gusts_10m_max": [32.0, 28.4],
     },
 }
 
@@ -110,13 +118,18 @@ def test_fetch_weather_daily_parses_records_and_params():
     assert first.tmin_f == 66.2
     assert first.wind_max_mph == 18.7
     assert first.wind_dir_dominant_deg == 245
+    assert first.precipitation_mm == 0.25
+    assert first.wind_gust_max_mph == 32.0
     assert first.natural_key == ("34.0522,-118.2437", "2023-07-01")
 
-    # Null wind on day two stays None while the rest of the day is kept.
+    # Null wind + null precip on day two stay None while the rest of the day
+    # (including gust) is kept.
     assert second.date_local == "2023-07-02"
     assert second.tmax_f == 92.1
     assert second.wind_max_mph is None
     assert second.wind_dir_dominant_deg == 230
+    assert second.precipitation_mm is None
+    assert second.wind_gust_max_mph == 28.4
 
     # Request params match the Open-Meteo archive contract.
     params = calls[0]
@@ -126,7 +139,8 @@ def test_fetch_weather_daily_parses_records_and_params():
     assert params["end_date"] == "2023-07-02"
     assert params["daily"] == (
         "temperature_2m_max,temperature_2m_min,"
-        "wind_speed_10m_max,wind_direction_10m_dominant"
+        "wind_speed_10m_max,wind_direction_10m_dominant,"
+        "precipitation_sum,wind_gusts_10m_max"
     )
     assert params["temperature_unit"] == "fahrenheit"
     assert params["wind_speed_unit"] == "mph"
@@ -237,6 +251,84 @@ def test_weather_store_roundtrip_and_idempotent(tmp_path):
         store.close()
 
 
+def _transport_wind_records(site_id):
+    """Two deterministic 850 hPa days for ``site_id``; the second day has a
+    missing v850 (kept as None, mirroring a partial NCSS response)."""
+    return [
+        TransportWindRecord(
+            site_id=site_id,
+            date_local="2023-07-01",
+            u850=4.2,
+            v850=-3.1,
+            source="ncep_daily",
+        ),
+        TransportWindRecord(
+            site_id=site_id,
+            date_local="2023-07-02",
+            u850=2.0,
+            v850=None,
+            source="ncep_daily",
+        ),
+    ]
+
+
+def test_transport_wind_store_roundtrip_and_idempotent(tmp_path):
+    store = AccuracyStore(tmp_path / "accuracy.db")
+    try:
+        records = _transport_wind_records("SITE_A")
+        assert store.insert_transport_wind(records) == 2
+        assert store.count_transport_wind() == 2
+
+        # Re-inserting replaces in place: still one row per natural key.
+        assert store.insert_transport_wind(records) == 2
+        assert store.count_transport_wind() == 2
+
+        fetched = store.fetch_transport_wind()
+        by_key = {r.natural_key: r for r in fetched}
+        for rec in records:
+            assert by_key[rec.natural_key] == rec
+
+        # The partial vector round-trips: v850 stays None, source is kept.
+        partial = by_key[("SITE_A", "2023-07-02")]
+        assert partial.u850 == 2.0
+        assert partial.v850 is None
+        assert partial.source == "ncep_daily"
+
+        # Site filter narrows to one site.
+        assert len(store.fetch_transport_wind(site_id="SITE_A")) == 2
+        assert store.fetch_transport_wind(site_id="nope") == []
+
+        # Direct SQL check: exactly one row per natural key.
+        conn = sqlite3.connect(store.db_path)
+        dupes = conn.execute(
+            "SELECT site_id, date_local, COUNT(*) FROM transport_wind "
+            "GROUP BY 1, 2 HAVING COUNT(*) > 1"
+        ).fetchall()
+        conn.close()
+        assert dupes == []
+    finally:
+        store.close()
+
+
+def test_has_transport_wind_coverage(tmp_path):
+    store = AccuracyStore(tmp_path / "accuracy.db")
+    try:
+        assert store.has_transport_wind_coverage("SITE_A", "2023-07-01", "2023-07-02") is False
+
+        store.insert_transport_wind(_transport_wind_records("SITE_A"))
+        # A window fully spanned by the stored rows counts as coverage.
+        assert store.has_transport_wind_coverage("SITE_A", "2023-07-01", "2023-07-02") is True
+        assert store.has_transport_wind_coverage("SITE_A", "2023-07-01", "2023-07-01") is True
+
+        # A window only partially overlapped is NOT covered, so it gets
+        # re-fetched (same semantics as has_weather_coverage).
+        assert store.has_transport_wind_coverage("SITE_A", "2023-06-01", "2023-07-01") is False
+        assert store.has_transport_wind_coverage("SITE_A", "2023-07-02", "2023-07-31") is False
+        assert store.has_transport_wind_coverage("SITE_B", "2023-07-01", "2023-07-02") is False
+    finally:
+        store.close()
+
+
 def _weather_records(site_id):
     """Two deterministic days for ``site_id`` (2023-07-01/02), mirroring the
     shape of ``WEATHER_FIXTURE_JSON`` parsed by ``fetch_weather_daily``."""
@@ -250,6 +342,8 @@ def _weather_records(site_id):
             tmin_f=60.0,
             wind_max_mph=10.0,
             wind_dir_dominant_deg=200,
+            precipitation_mm=0.0,
+            wind_gust_max_mph=20.0,
         )
         for idx, date_local in enumerate(("2023-07-01", "2023-07-02"))
     ]
@@ -288,13 +382,106 @@ def test_has_weather_coverage(tmp_path):
         assert store.has_weather_coverage("SITE_A", "2023-07-01", "2023-07-02") is False
 
         store.insert_weather_daily(_weather_records("SITE_A"))
-        # Any row inside the window counts as coverage.
+        # A window fully spanned by the stored rows counts as coverage.
         assert store.has_weather_coverage("SITE_A", "2023-07-01", "2023-07-02") is True
-        assert store.has_weather_coverage("SITE_A", "2023-06-01", "2023-07-01") is True
+        assert store.has_weather_coverage("SITE_A", "2023-07-01", "2023-07-01") is True
+
+        # A window only partially overlapped (rows inside it but not spanning
+        # it end-to-end) is NOT covered, so it gets re-fetched.
+        assert store.has_weather_coverage("SITE_A", "2023-06-01", "2023-07-01") is False
+        assert store.has_weather_coverage("SITE_A", "2023-07-02", "2023-07-31") is False
 
         # Non-overlapping windows or other sites report False.
         assert store.has_weather_coverage("SITE_A", "2023-08-01", "2023-08-31") is False
         assert store.has_weather_coverage("SITE_B", "2023-07-01", "2023-07-02") is False
+    finally:
+        store.close()
+
+
+def test_has_weather_coverage_requires_precip_and_gust(tmp_path):
+    """Coverage now means the window is spanned AND its rows carry precip +
+    gust. Rows written before the Track-B columns existed (NULL precip/gust)
+    must NOT count as covered so the backfill re-fetches them."""
+    store = AccuracyStore(tmp_path / "accuracy.db")
+    try:
+        # A full-span window whose rows lack precip/gust is NOT covered.
+        store.insert_weather_daily(_weather_records("SITE_A"))
+        conn = sqlite3.connect(store.db_path)
+        conn.execute(
+            "UPDATE weather_daily SET precipitation_mm = NULL, "
+            "wind_gust_max_mph = NULL"
+        )
+        conn.commit()
+        conn.close()
+        assert store.has_weather_coverage("SITE_A", "2023-07-01", "2023-07-02") is False
+        assert store.has_weather_coverage("SITE_A", "2023-07-01", "2023-07-01") is False
+
+        # A partially-backfilled window (one day still NULL) is NOT covered.
+        conn = sqlite3.connect(store.db_path)
+        conn.execute(
+            "UPDATE weather_daily SET precipitation_mm = 0.0, "
+            "wind_gust_max_mph = 20.0 WHERE date_local = '2023-07-01'"
+        )
+        conn.commit()
+        conn.close()
+        assert store.has_weather_coverage("SITE_A", "2023-07-01", "2023-07-02") is False
+
+        # Once every window day carries precip + gust, coverage is True.
+        conn = sqlite3.connect(store.db_path)
+        conn.execute(
+            "UPDATE weather_daily SET precipitation_mm = 0.0, "
+            "wind_gust_max_mph = 20.0 WHERE date_local = '2023-07-02'"
+        )
+        conn.commit()
+        conn.close()
+        assert store.has_weather_coverage("SITE_A", "2023-07-01", "2023-07-02") is True
+        assert store.has_weather_coverage("SITE_A", "2023-07-01", "2023-07-01") is True
+    finally:
+        store.close()
+
+
+def test_weather_daily_migrates_pre_existing_table(tmp_path):
+    """A store created before the precip/gust columns existed must gain the
+    columns idempotently (ALTER TABLE guarded by PRAGMA) WITHOUT losing rows."""
+    db_path = tmp_path / "accuracy.db"
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "CREATE TABLE weather_daily ("
+        "    site_id TEXT NOT NULL, lat REAL, lon REAL, date_local TEXT NOT NULL,"
+        "    tmax_f REAL, tmin_f REAL, wind_max_mph REAL,"
+        "    wind_dir_dominant_deg INTEGER,"
+        "    ingested_at TEXT NOT NULL DEFAULT (datetime('now')),"
+        "    PRIMARY KEY (site_id, date_local)"
+        ")"
+    )
+    conn.execute(
+        "INSERT INTO weather_daily (site_id, lat, lon, date_local, tmax_f, "
+        "tmin_f, wind_max_mph, wind_dir_dominant_deg) "
+        "VALUES ('SITE_A', 34.05, -118.24, '2023-07-01', 90.0, 60.0, 10.0, 200)"
+    )
+    conn.commit()
+    conn.close()
+
+    store = AccuracyStore(db_path)
+    try:
+        # The pre-existing row survived the migration and now reads back with
+        # NULL (not-yet-backfilled) precip/gust fields.
+        rows = store.fetch_weather_daily(site_id="SITE_A")
+        assert len(rows) == 1
+        row = rows[0]
+        assert row.precipitation_mm is None
+        assert row.wind_gust_max_mph is None
+
+        # Re-opening the same store is a no-op (columns already exist).
+        store.close()
+        store = AccuracyStore(db_path)
+        assert len(store.fetch_weather_daily(site_id="SITE_A")) == 1
+
+        # INSERT now writes the enriched columns for the migrated table.
+        assert store.insert_weather_daily(_weather_records("SITE_A")) == 2
+        fetched = {r.date_local: r for r in store.fetch_weather_daily(site_id="SITE_A")}
+        assert fetched["2023-07-01"].precipitation_mm == 0.0
+        assert fetched["2023-07-01"].wind_gust_max_mph == 20.0
     finally:
         store.close()
 

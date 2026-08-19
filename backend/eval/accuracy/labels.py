@@ -51,9 +51,11 @@ from backend.eval.accuracy.records import (
 
 # Schema map: EPA AQS parameter code -> canonical pollutant name. This is a
 # schema map (not a tunable threshold), so it lives here rather than in
-# engine/params.
+# engine/params. ``88502`` is the non-FRM PM2.5 mass code IMPROVE speciation
+# sites report their PM2.5 under, so it maps to PM2.5 like the FRM/FEM 88101.
 PARAMETER_TO_POLLUTANT: Dict[str, str] = {
     "88101": "PM2.5",
+    "88502": "PM2.5",
     "81102": "PM10",
     "44201": "O3",
     "42602": "NO2",

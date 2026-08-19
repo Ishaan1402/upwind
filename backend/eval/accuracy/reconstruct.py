@@ -219,7 +219,13 @@ def _firms_res_from_hotspots(
             "details": "No active thermal hotspots detected nearby",
         }
 
-    clusters = cluster_firms_hotspots(pixels, lat, lon)
+    # Thread the historical wind bearing into clustering exactly as live
+    # (fetch_firms_hotspots): with a bearing the graded angular upwind factor
+    # applies, keeping reconstruction byte-identical to the shipped scorer.
+    upwind_target_deg = wind_dir_deg % 360 if wind_dir_deg is not None else None
+    clusters = cluster_firms_hotspots(
+        pixels, lat, lon, upwind_target_deg=upwind_target_deg
+    )
     if not clusters:
         return {
             "status": "absent",
@@ -234,14 +240,15 @@ def _firms_res_from_hotspots(
     upwind_clusters = [c for c in clusters if c["is_upwind"]]
     total_count = len(clusters)
     count = len(upwind_clusters)
-    # The named source never contradicts the reported alignment: the strongest
-    # upwind cluster when one exists, else the strongest overall cluster.
-    nearest = upwind_clusters[0] if upwind_clusters else clusters[0]
+    # 'nearest' is the top cluster by relevance across ALL clusters (live
+    # behavior), so a far larger downwind fire can claim the named slot;
+    # alignment and count still report the upwind subset.
+    nearest = clusters[0]
 
     if upwind_clusters:
         details = (
             f"{count} upwind hotspot cluster(s) found "
-            f"(strongest cluster {nearest['distance_miles']} mi {nearest['bearing']} "
+            f"(strongest cluster overall {nearest['distance_miles']} mi {nearest['bearing']} "
             f"(FRP {nearest['frp']:.0f} MW, {nearest['detections']} detections)); "
             f"{total_count} total detected nearby"
         )
@@ -327,11 +334,14 @@ def _openaq_sig_from_aqs(aqs_records: List[AqsDailyRecord], date_local: str) -> 
     the same parameters. When a parameter has multiple POC rows, the row with
     the MAX non-null AQI wins (ties broken by highest concentration) — the same
     max-AQI logic ``build_observation`` uses; when no row has an AQI, the row
-    with the highest concentration wins. PM2.5 (88101) and PM10 (81102) carry
-    through with their reported units; O3/NO2/SO2 (44201/42602/42401) are
-    normalized to ppb (×1000 when stored in ppm) and CO (42101) is carried as
-    ppm — the units ``score_hypotheses`` compares against the OpenAQ
-    thresholds carried on :class:`Params` (via :func:`get_params`).
+    with the highest concentration wins. PM2.5 comes from either the FRM/FEM
+    code (88101) or the non-FRM mass code (88502 — the code IMPROVE speciation
+    sites report under): the best row across both codes is picked. PM10
+    (81102) carries through with its reported units; O3/NO2/SO2
+    (44201/42602/42401) are normalized to ppb (×1000 when stored in ppm) and
+    CO (42101) is carried as ppm — the units ``score_hypotheses`` compares
+    against the OpenAQ thresholds carried on :class:`Params` (via
+    :func:`get_params`).
     """
     def _pick(rows: List[AqsDailyRecord]) -> Optional[AqsDailyRecord]:
         """Best row for one parameter: max non-null AQI (tie-break: max
@@ -351,7 +361,9 @@ def _openaq_sig_from_aqs(aqs_records: List[AqsDailyRecord], date_local: str) -> 
             continue
         by_param.setdefault(rec.parameter_code, []).append(rec)
 
-    pm25_rec = _pick(by_param.get("88101", []))
+    # PM2.5 mass is reported under either the FRM/FEM code or the non-FRM
+    # 88502 code (IMPROVE speciation sites); the best row across both wins.
+    pm25_rec = _pick(by_param.get("88101", []) + by_param.get("88502", []))
     pm10_rec = _pick(by_param.get("81102", []))
     o3_rec = _pick(by_param.get("44201", []))
     no2_rec = _pick(by_param.get("42602", []))

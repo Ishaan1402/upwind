@@ -47,9 +47,11 @@ class WeatherDailyRecord:
     """One day of archived weather at a site (Open-Meteo ERA5 archive).
 
     Values mirror the requested daily aggregates in the units asked for
-    (Fahrenheit / mph): ``tmax_f``/``tmin_f`` are 2m temperature extremes and
+    (Fahrenheit / mph / mm): ``tmax_f``/``tmin_f`` are 2m temperature extremes,
     ``wind_max_mph``/``wind_dir_dominant_deg`` the 10m max wind speed and
-    dominant wind direction. Days with no value for a variable carry None.
+    dominant wind direction, ``precipitation_mm`` the daily precipitation sum
+    and ``wind_gust_max_mph`` the 10m max wind gust. Days with no value for a
+    variable carry None.
     """
 
     site_id: str
@@ -60,6 +62,33 @@ class WeatherDailyRecord:
     tmin_f: Optional[float]
     wind_max_mph: Optional[float]
     wind_dir_dominant_deg: Optional[int]
+    precipitation_mm: Optional[float] = None
+    wind_gust_max_mph: Optional[float] = None
+
+    @property
+    def natural_key(self) -> Tuple[str, str]:
+        """Natural key used for idempotent SQLite upserts."""
+        return (self.site_id, self.date_local)
+
+
+@dataclass(frozen=True)
+class TransportWindRecord:
+    """One day of 850 hPa transport-layer wind at a site (NCEP/NCAR
+    Reanalysis-1 daily u/v components, 2.5° grid, via NOAA PSL THREDDS NCSS).
+
+    ``u850``/``v850`` are the eastward/northward wind components in m/s at
+    850 hPa; the derived speed / meteorological direction are computed
+    downstream (specbench features), so the store keeps the raw vector.
+    ``source`` records provenance (``"ncep_daily"`` for the daily reanalysis
+    averages; ``"ncep_monthly"`` for the monthly-mean fallback, when used).
+    Days with a missing component carry None for that field.
+    """
+
+    site_id: str
+    date_local: str  # "YYYY-MM-DD"
+    u850: Optional[float]
+    v850: Optional[float]
+    source: str
 
     @property
     def natural_key(self) -> Tuple[str, str]:
@@ -89,6 +118,39 @@ class FirmsHotspotRecord:
     def natural_key(self) -> Tuple[float, float, str, Optional[str]]:
         """Natural key used for idempotent SQLite upserts."""
         return (self.lat, self.lon, self.acq_datetime, self.satellite)
+
+
+@dataclass(frozen=True)
+class SpeciationRow:
+    """One row of an EPA AQS speciation daily file (daily_SPEC_YYYY.csv).
+
+    Speciation is the PM2.5 chemical-composition dataset (elements, ions,
+    carbon) used by IMPROVE-type analyses. ``site_id`` is the canonical
+    zero-padded ``SS-CCC-NNNN`` form built from State Code / County Code /
+    Site Num, exactly as ``AqsDailyRecord``. The natural key drops POC/method
+    because label derivation keys on one concentration per parameter per day
+    (INSERT OR REPLACE keeps re-ingestion idempotent).
+
+    ``lat``/``lon`` mirror the published Latitude/Longitude columns (inside the
+    ingest bbox) and feed the ``speciation_sites`` table used to fetch weather
+    for IMPROVE sites; they are not stored on the ``speciation`` row itself.
+    """
+
+    site_id: str
+    date_local: str  # "YYYY-MM-DD"
+    parameter_code: str
+    parameter_name: Optional[str]
+    method_code: Optional[str]
+    method_name: Optional[str]
+    concentration: Optional[float]
+    units: Optional[str]
+    lat: Optional[float] = None
+    lon: Optional[float] = None
+
+    @property
+    def natural_key(self) -> Tuple[str, str, str]:
+        """Natural key used for idempotent SQLite upserts."""
+        return (self.site_id, self.date_local, self.parameter_code)
 
 
 @dataclass(frozen=True)
