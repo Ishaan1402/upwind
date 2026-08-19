@@ -16,6 +16,7 @@ Rules:
 9. No Invented Transport: Do NOT invent transport mechanisms (e.g. trapping by light winds or shallow boundary layer) unless those appear in the top hypothesis's support list.
 10. Unverified News Handling: If open_questions mention an unverified news fire, treat it as uncertainty or distant context, not the primary cause.
 11. Reading Conflicts: If open_questions mention a mismatch between the reported AQI and a monitor reading, acknowledge it in one plain sentence that explains the difference (the AQI is a longer-term average; the monitor reading is current), and do not present it as a reason to doubt the overall AQI verdict.
+12. No Invented Fire Size: Never assign a size, acreage, or rank to a fire whose name is sourced only from news headlines. If a fire's size is unknown, say the size is unknown - do not invent one, and do not describe it as a cluster of smaller fires.
 """
 
 def generate_fallback_narrative(

@@ -6,6 +6,7 @@ from backend.services.firms import (
     calculate_bearing_degrees,
     bearing_degrees_to_compass,
     angular_difference,
+    angular_upwind_factor,
 )
 from backend.engine.params import get_params
 
@@ -186,7 +187,13 @@ def _select_relevant_wildfires(
             if incident["size_acres"] is not None
             else p.wfigs_default_size_acres
         )
-        upwind = p.wfigs_upwind_bonus if incident["is_upwind"] else 1.0
+        # Graded upwind multiplier (full bonus on-axis, cosine decay to 1.0 at
+        # >= 90 deg off); the boolean is_upwind gate is unchanged.
+        upwind_angular_diff = (
+            0.0 if wind_dir_deg is None
+            else angular_difference(incident["bearing_deg"], wind_dir_deg % 360)
+        )
+        upwind = angular_upwind_factor(upwind_angular_diff, p.wfigs_upwind_bonus)
         decay = 1.0 / (incident["distance_miles"] + p.wfigs_relevance_eps_miles)
         incident["relevance"] = round(size * activity * upwind * decay, 1)
 

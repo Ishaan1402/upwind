@@ -55,6 +55,18 @@ def angular_difference(deg_a: float, deg_b: float) -> float:
     diff = abs(deg_a - deg_b) % 360
     return min(diff, 360 - diff)
 
+def angular_upwind_factor(angular_diff_deg: float, upwind_bonus: float) -> float:
+    """Graded upwind relevance multiplier.
+
+    Replaces the old hard binary (``upwind_bonus if is_upwind else 1.0``) with a
+    cosine decay over the angular difference from the true upwind bearing: an
+    on-axis source keeps the full ``upwind_bonus``, a 45-degree-off source gets
+    roughly ``1 + (bonus - 1) * cos(45)``, and anything >= 90 degrees off stays
+    neutral at 1.0 (never below). The boolean ``is_upwind`` gate is computed
+    separately and is unaffected by this factor.
+    """
+    return 1.0 + (upwind_bonus - 1.0) * max(math.cos(math.radians(angular_diff_deg)), 0.0)
+
 def filter_upwind_hotspots(hotspots: List[Dict[str, Any]], wind_dir_deg: Optional[float]) -> List[Dict[str, Any]]:
     """
     Given hotspots (each with a 'bearing_deg' float field), return only those
@@ -187,6 +199,7 @@ def cluster_firms_hotspots(
     target_lat: float,
     target_lon: float,
     cluster_radius_km: Optional[float] = None,
+    upwind_target_deg: Optional[float] = None,
 ) -> List[Dict[str, Any]]:
     """
     Greedy centroid clustering over surviving FIRMS pixels (pure Python).
@@ -289,7 +302,16 @@ def cluster_firms_hotspots(
         dist_km, dist_mi = calculate_haversine_distance(target_lat, target_lon, clat, clon)
         bearing_deg = calculate_bearing_degrees(target_lat, target_lon, clat, clon)
         recency = max(p.firms_recency_floor, 2 ** (-age_hours / p.firms_recency_half_life_hours))
-        upwind = p.firms_upwind_bonus if is_upwind else 1.0
+        # Graded upwind multiplier (full bonus on-axis, cosine decay to 1.0 at
+        # >= 90 deg off); the boolean is_upwind above is the unchanged gate.
+        # Without a wind bearing (upwind_target_deg None) the angular term is
+        # undefined, so keep the historical binary factor exactly - callers
+        # that predate the angular term (accuracy reconstruction) depend on it.
+        if upwind_target_deg is None:
+            upwind = p.firms_upwind_bonus if is_upwind else 1.0
+        else:
+            upwind_angular_diff = angular_difference(bearing_deg, upwind_target_deg)
+            upwind = angular_upwind_factor(upwind_angular_diff, p.firms_upwind_bonus)
         decay = 1.0 / (dist_mi + p.firms_relevance_eps_miles)
 
         cluster = {
@@ -434,7 +456,10 @@ async def fetch_firms_hotspots(
                 bearing_deg = calculate_bearing_degrees(target_lat, target_lon, h_lat, h_lon)
                 is_upwind = wind_dir_deg is None or angular_difference(bearing_deg, upwind_target_deg) <= p.upwind_sector_width_deg
                 recency = max(p.firms_recency_floor, 2 ** (-age_hours / p.firms_recency_half_life_hours))
-                upwind = p.firms_upwind_bonus if is_upwind else 1.0
+                # Graded upwind multiplier (full bonus on-axis, cosine decay to
+                # 1.0 at >= 90 deg off); the boolean is_upwind gate is unchanged.
+                upwind_angular_diff = 0.0 if wind_dir_deg is None else angular_difference(bearing_deg, upwind_target_deg)
+                upwind = angular_upwind_factor(upwind_angular_diff, p.firms_upwind_bonus)
                 decay = 1.0 / (dist_mi + p.firms_relevance_eps_miles)
 
                 pixels.append({
@@ -467,7 +492,7 @@ async def fetch_firms_hotspots(
             pixels.sort(key=lambda x: x["relevance"], reverse=True)
 
             # Spatial clustering: summed FRP per cluster + persistence (detections).
-            clusters = cluster_firms_hotspots(pixels, target_lat, target_lon)
+            clusters = cluster_firms_hotspots(pixels, target_lat, target_lon, upwind_target_deg=upwind_target_deg)
             if not clusters:
                 return {
                     "status": "absent",
@@ -482,10 +507,11 @@ async def fetch_firms_hotspots(
             upwind_clusters = [c for c in clusters if c["is_upwind"]]
             total_count = len(clusters)
             count = len(upwind_clusters)
-            # 'nearest' is the strongest upwind cluster when one exists, so the
-            # named source never contradicts the reported alignment ("upwind");
-            # otherwise fall back to the strongest overall cluster ("nearby").
-            nearest = upwind_clusters[0] if upwind_clusters else clusters[0]
+            # 'nearest' is the top cluster by relevance across ALL clusters, so
+            # a far larger downwind fire can claim the named slot instead of
+            # being outranked by a weak upwind cluster; alignment and count
+            # still report the upwind subset (smoke corroboration unchanged).
+            nearest = clusters[0]
 
             if upwind_clusters:
                 return {
@@ -498,7 +524,7 @@ async def fetch_firms_hotspots(
                     "alignment": "upwind",
                     "details": (
                         f"{count} upwind hotspot cluster(s) found "
-                        f"(strongest cluster {nearest['distance_miles']} mi {nearest['bearing']} "
+                        f"(strongest cluster overall {nearest['distance_miles']} mi {nearest['bearing']} "
                         f"(FRP {nearest['frp']:.0f} MW, {nearest['detections']} detections)); "
                         f"{total_count} total detected nearby"
                     )
