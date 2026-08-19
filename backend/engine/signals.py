@@ -21,7 +21,7 @@ from backend.engine.params import get_params
 
 TOOL_STEPS = {
     "weather_vector": "Calculating Open-Meteo wind trajectory & temperature",
-    "aod_density": "Reading CAMS Aerosol Optical Depth (AOD) column density",
+    "aod_density": "Reading modeled Aerosol Optical Depth (AOD) column density",
     "hms_scan": "Checking NOAA smoke-plume analysis overhead",
     "wfigs_scan": "Checking federal wildfire incident registry",
     "firms_scan": "Scanning NASA FIRMS thermal hotspot clusters upwind",
@@ -374,7 +374,7 @@ def build_evidence_signals(
     # Signal 1: Aerosol Optical Depth Plume
     signals.append({
         "id": "aerosol_plume",
-        "label": "Atmospheric Column Particle Density (AOD)",
+        "label": "Modeled Atmospheric Column Particle Density (AOD)",
         "status": aod_res["status"],
         "density": aod_res.get("density"),
         "aod_value": aod_res.get("aod_value"),
@@ -393,9 +393,10 @@ def build_evidence_signals(
     # Signal 3: FIRMS Upwind Hotspots
     firms_status = firms_res["status"]
     firms_details = firms_res.get("details", "")
-    aod_value = float(aod_res.get("aod_value") or 0.0)
+    # AOD is modeled column loading, NOT fire evidence: it does not corroborate
+    # a news incident. Only verified FIRMS hotspots do.
     firms_present = firms_status == "present"
-    has_corroboration = firms_present or (aod_res.get("status") == "present" and aod_value >= p.aod_haze)
+    has_corroboration = firms_present
 
     signals.append({
         "id": "firms_upwind",

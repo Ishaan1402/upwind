@@ -122,6 +122,9 @@ def score_hypotheses(
         op_present and not measured_conflict and pm_ratio is not None
         and pm_ratio < p.openaq_dust_ratio_max
     )
+    # No fine/coarse ratio available (PM10-only/PM2.5-only monitors, or OpenAQ
+    # entirely down): the smoke-vs-dust discriminator is genuinely unavailable.
+    ratio_missing = pm_ratio is None
     urban_tracer = op_present and not measured_conflict and pm_elevated and (
         (no2_ppb is not None and no2_ppb >= p.openaq_no2_ppb)
         or (so2_ppb is not None and so2_ppb >= p.openaq_so2_ppb)
@@ -170,15 +173,13 @@ def score_hypotheses(
 
     # Count verified positive fire evidence indicators
     positive_fire_signals = []
-    if aod_present and aod_value >= p.aod_medium:
-        positive_fire_signals.append(f"Dense atmospheric column particle plume detected (AOD {aod_value:.2f})")
-    elif light_haze_extreme_pm:
-        positive_fire_signals.append(
-            f"Light atmospheric haze (AOD {aod_value:.2f}) with very unhealthy surface PM (AQI {aqi_val}), consistent with settling smoke"
-        )
+    # AOD is modeled column loading, NOT fire evidence; it corroborates but is never a fire vote.
     if has_firms_corroboration:
         loc_str = f" ({nearest_firm['distance_miles']} mi {nearest_firm['bearing']})" if nearest_firm else ""
-        align_label = "upwind" if firms_upwind else "nearby (not wind-aligned)"
+        # The alignment word describes the NAMED cluster (nearest), not the
+        # upwind subset that firms_upwind gates: 'nearest' may be the strongest
+        # overall cluster, which can be downwind even when upwind clusters exist.
+        align_label = "upwind" if (nearest_firm or {}).get("is_upwind") else "nearby (not wind-aligned)"
         positive_fire_signals.append(
             f"Detected {firms_count} active NASA FIRMS thermal hotspot cluster(s) {align_label}{loc_str}"
         )
@@ -285,18 +286,18 @@ def score_hypotheses(
         smoke_conf = "high"
         smoke_score = 90
     elif firms_upwind and pm_elevated:
-        smoke_conf = "high" if aod_value >= p.aod_heavy else "medium"
-        smoke_score = 75 if aod_value >= p.aod_heavy else 65
+        smoke_conf = "medium"
+        smoke_score = 65
     elif hms_present and pm_elevated:
-        # Analyst-verified plume; high only with a dense plume and supporting column
-        hms_high = (hms_density in ("medium", "heavy") and aod_value >= p.aod_medium) or aod_value >= p.aod_heavy
+        # Analyst-verified plume; high only with a dense analyst plume
+        hms_high = hms_density in ("medium", "heavy")
         smoke_conf = "high" if hms_high else "medium"
         smoke_score = 85 if hms_high else 70
     elif wfigs_corroborates and wfigs_alignment == "upwind" and pm_elevated:
-        # Upwind WFIGS federal incident scoring
+        # Upwind WFIGS federal incident scoring; only extreme PM pushes to high
         extreme_pm = aqi_val >= p.extreme_pm_aqi
-        smoke_conf = "high" if (aod_value >= p.aod_heavy or extreme_pm) else "medium"
-        smoke_score = 80 if (aod_value >= p.aod_heavy or extreme_pm) else 70
+        smoke_conf = "high" if extreme_pm else "medium"
+        smoke_score = 80 if extreme_pm else 70
     elif has_firms_corroboration and pm_elevated:
         # Nearby non-upwind FIRMS hotspot scoring
         smoke_conf = "medium"
@@ -304,21 +305,6 @@ def score_hypotheses(
     elif wfigs_corroborates and pm_elevated:
         # Nearby non-upwind WFIGS incident scoring
         smoke_conf, smoke_score = "medium", 55
-    elif aod_value >= p.aod_heavy and pm_elevated:
-        # Heavy plume without nearby hotspots
-        smoke_conf = "medium"
-        smoke_score = 70
-    elif light_haze_extreme_pm:
-        # Light AOD with extreme PM lacking FIRMS
-        smoke_conf = "medium"
-        smoke_score = 65
-    elif aod_value >= p.aod_medium and pm_elevated:
-        # Medium haze without FIRMS
-        smoke_conf = "medium"
-        smoke_score = 55
-    elif fire_signal_count >= p.fire_signal_min_count:
-        smoke_conf = "medium"
-        smoke_score = 50
     else:
         smoke_conf = "low"
         smoke_score = 25
@@ -345,16 +331,34 @@ def score_hypotheses(
         smoke_score = min(smoke_score, 45)
         smoke_conf = "low"
 
+    # Windy PM10-primary days where the fine/coarse ratio is MISSING (PM10-only
+    # or PM2.5-only monitors, or OpenAQ entirely down) are dust-suspect: without
+    # the ratio smoke cannot be confirmed, and strong wind + coarse-primary PM
+    # favors windblown dust. Fire evidence alone must not crown smoke on these days.
+    if pm10_primary and pm_elevated and is_high_wind and ratio_missing:
+        smoke_score = min(smoke_score, 45)
+        smoke_conf = "low"
+        smoke_against.append(
+            f"The fine/coarse particle ratio is unavailable{monitor_distance_suffix}, so smoke cannot be confirmed against a windblown-dust alternative"
+        )
+        open_questions.append(
+            "PM10 is elevated with strong wind and no fine/coarse particle ratio "
+            "available, so smoke cannot be confirmed; windblown dust is the "
+            "better-supported explanation."
+        )
+
     place_desc = None
     if nearest_firm:
-        align_word = "Upwind" if firms_upwind else "Nearby"
+        # 'nearest' is the top cluster across ALL clusters, so describe the
+        # cluster actually named (its own is_upwind flag), not the upwind subset.
+        align_word = "Upwind" if nearest_firm.get("is_upwind") else "Nearby"
         place_desc = (
-            f"Incident: {incident_name}"
+            f"News-reported fire '{incident_name}' (size unknown)"
             if (incident_name and has_firms_corroboration)
             else f"{align_word} hotspots {nearest_firm['distance_miles']} mi {nearest_firm['bearing']}"
         )
     elif incident_name and has_firms_corroboration:
-        place_desc = f"Incident: {incident_name}"
+        place_desc = f"News-reported fire '{incident_name}' (size unknown)"
     elif wfigs_corroborates and wfigs_incident:
         place_desc = f"Incident: {wfigs_incident['name']}"
 
@@ -530,7 +534,7 @@ def score_hypotheses(
 
     is_dust_or_stagnation = pm10_primary or (is_cold and is_calm)
 
-    if pm_elevated and fire_signal_count == 0 and not is_dust_or_stagnation:
+    if pm_elevated and fire_signal_count == 0 and not has_haze and not is_dust_or_stagnation:
         urban_support.append(f"PM2.5 is elevated (AQI {aqi_val}) without verified fire, dust, or stagnation signals")
     elif pm_elevated and light_haze_extreme_pm and not is_dust_or_stagnation:
         urban_support.append(
@@ -573,12 +577,10 @@ def score_hypotheses(
         urban_against.append(
             "Light atmospheric haze with very unhealthy PM, favoring regional smoke settling over purely local urban emissions"
         )
-    elif fire_signal_count >= p.fire_signal_min_count and aod_value >= p.aod_heavy:
-        urban_against.append("Heavy atmospheric particle plume present; long-range smoke may contribute")
     if is_dust_or_stagnation:
         urban_against.append("Conditions better match windblown dust or winter stagnation than generic urban/industrial PM")
 
-    if pm_elevated and fire_signal_count == 0 and not is_dust_or_stagnation:
+    if pm_elevated and fire_signal_count == 0 and not has_haze and not is_dust_or_stagnation:
         # Clear AOD with elevated PM favors local urban emissions
         urban_conf, urban_score = "high", 75
     elif pm_elevated and light_haze_extreme_pm and not is_dust_or_stagnation:
