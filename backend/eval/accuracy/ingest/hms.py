@@ -5,8 +5,13 @@ polygons. This adapter ingests the historical archive on NESDIS
 (``https://satepsanone.nesdis.noaa.gov/pub/FIRE/HMS/hms_backup``): for each
 day it tries the daily smoke KML first (``.../KML/smoke<YYYYMMDD>.kml``) and
 falls back to the shapefile zip (``.../GIS/SMOKE/hms_smoke<YYYYMMDD>.zip``).
-Only the KML path is parsed — with the stdlib ``xml.etree.ElementTree``, so no
-new dependency is required; a day that resolves to neither URL is skipped.
+For 2003-2019 those per-day files are NOT published — the years exist only as
+yearly ``<YYYY>.tar`` tarballs at the top of ``hms_backup/`` — so the adapter
+ingests those years from the tarball (the daily smoke KMLs live inside as
+``KML/smoke<YYYYMMDD>.kml.gz``) and keeps the per-day path for 2020+.
+Only the KML path is parsed — with the stdlib ``xml.etree.ElementTree`` plus
+``tarfile``/``gzip``, so no new dependency is required; a day that resolves to
+no KML is skipped.
 
 KML parsing is namespace-tolerant: NOAA's files carry the KML 2.2 default
 namespace (``http://www.opengis.net/kml/2.2``) and bare/unnamespaced XML is
@@ -20,21 +25,27 @@ Archive layout (verified 2026-08):
   ``GIS/SMOKE/hms_smoke<YYYYMMDD>.zip`` are both live per-day URLs (the
   ``hms_smoke<YYYYMMDD>.kml`` name does NOT resolve; NOAA names the smoke KMLs
   ``smoke<YYYYMMDD>.kml``).
-- 2003-2019 exist only as ``<YYYY>.tar`` tarballs at the top of ``hms_backup/``,
-  so per-day KML/zip URLs 404 for those years (known gap for this phase).
+- 2003-2019 exist only as ``<YYYY>.tar`` tarballs at the top of ``hms_backup/``
+  (``<YYYY>.tar.gz`` does NOT resolve). Each tarball mirrors the year's whole
+  ``hms_backup/<YYYY>/`` tree; the analyst smoke KMLs are stored gzip-compressed
+  as ``KML/smoke<YYYYMMDD>.kml.gz`` alongside ``fire*``/``hysplit*`` KMLs (a
+  separate product, not ingested). Some years' tarballs carry no smoke KMLs at
+  all (observed for 2016-2018); those days resolve to no KML and are skipped.
 - The 2021+ archive is not hosted on NESDIS (satepsanone stops at 2020).
   ``ingest_hms_smoke_range`` tolerates the resulting 404s by skipping days.
 """
 
+import gzip
 import json
 import re
 import shutil
+import tarfile
 import time
 import zipfile
 import xml.etree.ElementTree as ET
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, Iterable, List, Optional
 
 import httpx
 
@@ -47,6 +58,21 @@ HMS_BACKUP_BASE_URL = "https://satepsanone.nesdis.noaa.gov/pub/FIRE/HMS/hms_back
 _TIMEOUT_S = 60.0
 # Be polite to the archive server between per-day requests.
 _DAY_DELAY_S = 0.2
+
+# Years published ONLY as yearly ``<year>.tar`` tarballs. NESDIS extracts the
+# per-day ``hms_backup/<year>/`` tree from 2020 on; 2003-2019 exist only as
+# tarballs, so the ingest switches to the tarball path for ``year <=`` this.
+YEARLY_TARBALL_LAST_YEAR = 2019
+
+# A whole year's tarball is ~1GB (2019 is 1.14GB), so its download gets a much
+# more generous timeout than the small per-day files above.
+_TARBALL_TIMEOUT_S = 3600.0
+
+# Basenames of the daily analyst smoke KMLs inside a yearly tarball
+# (``smoke<YYYYMMDD>.kml``, gzip-compressed as ``smoke<YYYYMMDD>.kml.gz``).
+# ``fire*``/``hysplit*`` KMLs share the tarball's KML directory but are a
+# separate product and must not be ingested as smoke records.
+_DAILY_SMOKE_KML_RE = re.compile(r"^smoke(\d{8})\.kml(?:\.gz)?$", re.IGNORECASE)
 
 # Zip-bomb guards: total decompressed bytes and member count are capped when
 # unzipping archive downloads (see ``_extract_zip``).
@@ -162,6 +188,23 @@ def parse_hms_kml(kml_text: str, date_local: str) -> List[HmsSmokeRecord]:
     return records
 
 
+def _records_from_day(paths: Iterable[Path], date_local: str) -> List[HmsSmokeRecord]:
+    """Parse one day's downloaded files into HMS records.
+
+    Shared by the per-day download path and the yearly-tarball path so both
+    ingest through the same parse routine. Only ``*.kml`` files are parsed —
+    the shapefile fallback is downloaded, not parsed (KML-only phase). The
+    tarball path produces ``smoke<YYYYMMDD>.kml`` files under the same flat
+    naming the per-day path writes, so downstream handling is identical.
+    """
+    records: List[HmsSmokeRecord] = []
+    for path in paths:
+        if path.suffix.lower() != ".kml":
+            continue
+        records.extend(parse_hms_kml(path.read_text(encoding="utf-8"), date_local))
+    return records
+
+
 def _extract_zip(zip_path: Path, out_dir: Path) -> List[Path]:
     """Extract every member of a downloaded HMS zip into out_dir (flattened to
     the member basename, matching the AQS adapter) and return the paths.
@@ -195,6 +238,112 @@ def _extract_zip(zip_path: Path, out_dir: Path) -> List[Path]:
                 shutil.copyfileobj(src, dst)
             extracted.append(target)
     return extracted
+
+
+def _download_year_tarball(year: int, tar_path: Path) -> bool:
+    """Download ``hms_backup/<year>.tar`` (with a ``.tar.gz`` fallback) into
+    ``tar_path``, streaming the ~1GB body to disk.
+
+    Returns True on success; False when the archive does not exist (both
+    candidates 404), so the caller can fall back to the per-day URLs. The
+    body is written to a ``.part`` sibling first and renamed only once
+    complete, so an interrupted download never leaves a corrupt tarball
+    behind. Network errors and unexpected statuses propagate — the CLI then
+    fails the year chunk and keeps the watermark from advancing past it.
+    """
+    candidates = [
+        f"{HMS_BACKUP_BASE_URL}/{year}.tar",
+        f"{HMS_BACKUP_BASE_URL}/{year}.tar.gz",
+    ]
+    part_path = tar_path.parent / f"{tar_path.name}.part"
+    with httpx.Client(timeout=_TARBALL_TIMEOUT_S, follow_redirects=True) as client:
+        for url in candidates:
+            try:
+                with client.stream("GET", url) as resp:
+                    if resp.status_code == 404:
+                        continue
+                    resp.raise_for_status()
+                    with open(part_path, "wb") as fh:
+                        for chunk in resp.iter_bytes(chunk_size=1 << 20):
+                            fh.write(chunk)
+                    part_path.rename(tar_path)
+                    return True
+            except httpx.HTTPError:
+                part_path.unlink(missing_ok=True)
+                raise
+    return False
+
+
+def _extract_tarball_kmls(tar_path: Path, out_dir: Path) -> List[Path]:
+    """Extract the daily smoke KMLs from a yearly HMS tarball into out_dir.
+
+    The yearly tarball mirrors the whole ``hms_backup/<year>/`` directory tree
+    (auto-detection products, fire/hysplit KMLs, shapefiles) and stores the
+    analyst smoke KMLs gzip-compressed (``KML/smoke<YYYYMMDD>.kml.gz``). Only
+    members whose basename matches ``_DAILY_SMOKE_KML_RE`` are written, each
+    decompressed (gzip when needed) to ``out_dir/smoke<YYYYMMDD>.kml`` — the
+    same flat naming the per-day path produces, so downstream parsing is
+    identical. Members are selected by basename so a path-traversal member
+    name cannot escape out_dir, and extraction is bounded by the same
+    ``MAX_EXTRACT_MEMBERS`` / ``MAX_EXTRACT_BYTES`` guards as ``_extract_zip``.
+    """
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    extracted: List[Path] = []
+    extracted_bytes = 0
+    with tarfile.open(tar_path, "r:*") as tf:
+        for member in tf.getmembers():
+            if not member.isfile():
+                continue
+            match = _DAILY_SMOKE_KML_RE.match(Path(member.name).name)
+            if match is None:
+                continue
+            if len(extracted) >= MAX_EXTRACT_MEMBERS:
+                raise RuntimeError(
+                    f"{tar_path.name}: archive has more than {MAX_EXTRACT_MEMBERS} "
+                    "smoke KML members"
+                )
+            extracted_bytes += member.size
+            if extracted_bytes > MAX_EXTRACT_BYTES:
+                raise RuntimeError(
+                    f"{tar_path.name}: decompressed size exceeds "
+                    f"{MAX_EXTRACT_BYTES} bytes"
+                )
+            target = out_dir / f"smoke{match.group(1)}.kml"
+            src = tf.extractfile(member)
+            if Path(member.name).name.lower().endswith(".gz"):
+                with gzip.GzipFile(fileobj=src, mode="rb") as gz, open(target, "wb") as dst:
+                    shutil.copyfileobj(gz, dst)
+            else:
+                with open(target, "wb") as dst:
+                    shutil.copyfileobj(src, dst)
+            extracted.append(target)
+    return extracted
+
+
+def fetch_hms_smoke_year_tarball(year: int, out_dir: Path) -> Optional[List[Path]]:
+    """Download the yearly ``<year>.tar`` tarball for 2003-2019 and extract
+    its daily smoke KMLs, returning the extracted ``smoke<YYYYMMDD>.kml``
+    paths.
+
+    Returns ``None`` when the year has no tarball (both ``<year>.tar`` and
+    ``<year>.tar.gz`` 404) so callers can fall back to the per-day URLs, an
+    empty list when the tarball exists but carries no smoke KMLs (a year that
+    truly published none, observed for 2016-2018), or the extracted paths.
+    Resumable like the AQS adapter: an already-downloaded tarball in out_dir
+    is reused instead of re-fetching the ~1GB archive.
+    """
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    tar_path = out_dir / f"{year}.tar"
+
+    if tar_path.exists():
+        if tar_path.stat().st_size == 0:
+            return []
+    elif not _download_year_tarball(year, tar_path):
+        return None
+    return _extract_tarball_kmls(tar_path, out_dir)
 
 
 def fetch_hms_smoke_daily(date: datetime, out_dir: Path) -> List[Path]:
@@ -244,10 +393,16 @@ def ingest_hms_smoke_range(
     """Download, parse, and persist HMS smoke polygons for every day in
     ``[start_date, end_date]`` (both ``YYYY-MM-DD``).
 
-    Days whose KML (or zip fallback) is missing are skipped rather than
-    erroring, and a short sleep keeps the archive server polite between days.
-    Returns the number of records written. Shapefile-zip fallbacks are
-    downloaded but not parsed in this KML-only phase.
+    Years through ``YEARLY_TARBALL_LAST_YEAR`` (2003-2019) are ingested from
+    the yearly ``<year>.tar`` tarball: it is fetched/extracted once per year
+    and each day's ``smoke<YYYYMMDD>.kml`` is parsed from it. When the tarball
+    is missing for the year the per-day URLs are tried instead; when the
+    tarball exists but the day (or year) has no smoke KML, the day is skipped.
+    Years after that (2020+) use the per-day URLs directly. Days whose KML
+    (or zip fallback) is missing are skipped rather than erroring, and a short
+    sleep keeps the archive server polite between days. Returns the number of
+    records written. Shapefile-zip fallbacks are downloaded but not parsed in
+    this KML-only phase.
     """
     out_dir = Path(out_dir)
     start = date.fromisoformat(start_date)
@@ -256,16 +411,30 @@ def ingest_hms_smoke_range(
     total = 0
     first = True
     day = start
+    year_kml_paths: Dict[int, Optional[List[Path]]] = {}
     while day <= end:
         if not first:
             time.sleep(_DAY_DELAY_S)
         first = False
 
-        for path in fetch_hms_smoke_daily(day, out_dir):
-            if path.suffix.lower() != ".kml":
-                continue  # shapefile fallback is downloaded, not parsed (KML phase)
-            records = parse_hms_kml(path.read_text(encoding="utf-8"), day.isoformat())
-            total += store.insert_hms_smoke(records)
+        year = day.year
+        day_kml_name = f"smoke{day.strftime('%Y%m%d')}.kml"
+
+        day_paths: List[Path] = []
+        if year <= YEARLY_TARBALL_LAST_YEAR:
+            if year not in year_kml_paths:
+                year_kml_paths[year] = fetch_hms_smoke_year_tarball(year, out_dir)
+            tarball_kmls = year_kml_paths[year]
+            if tarball_kmls is not None:
+                day_paths = [p for p in tarball_kmls if p.name == day_kml_name]
+            if not day_paths and tarball_kmls is None:
+                # No tarball for the year — fall back to the per-day URLs,
+                # which skip the day when both 404.
+                day_paths = fetch_hms_smoke_daily(day, out_dir)
+        else:
+            day_paths = fetch_hms_smoke_daily(day, out_dir)
+
+        total += store.insert_hms_smoke(_records_from_day(day_paths, day.isoformat()))
         day += timedelta(days=1)
     return total
 
