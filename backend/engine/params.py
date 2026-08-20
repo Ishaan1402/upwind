@@ -174,6 +174,13 @@ class Params:
     high_wind_speed_mph: float = 15.0
     # Wind speed at/above this (mph) supports medium-confidence dust
     dust_wind_speed_mph: float = 8.0
+    # Daily-max wind gust above which dust lofting is confirmed
+    dust_gust_mph_min: float = 40.0
+    # 30-day antecedent precip below which soils are dust-ready; Lamar climatology
+    dust_precip_30d_max_in: float = 0.6
+    # Only trust an AirNow PM2.5/PM10 ratio when the source monitor is this close;
+    # a distant monitor is not representative of a local plume.
+    airnow_ratio_max_distance_km: float = 15.0
     # Temperature below this (°F) counts as cold (winter stagnation)
     cold_temp_f: float = 55.0
     # Temperature below this (°F) suppresses photochemical ozone generation

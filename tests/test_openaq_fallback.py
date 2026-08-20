@@ -34,7 +34,8 @@ def _run(monitors, latest_side_effect):
              102: {"name": "co", "units": "ppm"},
          }), \
          patch("backend.engine.signals.fetch_daily_baseline", new_callable=AsyncMock, return_value=None), \
-         patch("backend.engine.signals.fetch_same_hour_baseline", new_callable=AsyncMock, return_value=None):
+         patch("backend.engine.signals.fetch_same_hour_baseline", new_callable=AsyncMock, return_value=None), \
+         patch("backend.engine.signals.fetch_airnow_concentrations", new_callable=AsyncMock, return_value=None):
         return asyncio.run(collect_openaq_signal(34.0, -118.0))
 
 
@@ -93,7 +94,8 @@ def test_skips_baseline_calls_when_include_baselines_false():
              101: {"name": "pm25", "units": "µg/m³"},
          }), \
          patch("backend.engine.signals.fetch_daily_baseline", new_callable=AsyncMock) as daily, \
-         patch("backend.engine.signals.fetch_same_hour_baseline", new_callable=AsyncMock) as same_hour:
+         patch("backend.engine.signals.fetch_same_hour_baseline", new_callable=AsyncMock) as same_hour, \
+         patch("backend.engine.signals.fetch_airnow_concentrations", new_callable=AsyncMock, return_value=None):
         signal = asyncio.run(collect_openaq_signal(34.0, -118.0, include_baselines=False))
 
     assert signal["status"] == "present"

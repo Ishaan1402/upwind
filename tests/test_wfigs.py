@@ -206,6 +206,7 @@ def _mock_client(geojson=None, raise_exc=False, status=200):
     return mock_client
 
 
+@pytest.mark.honesty
 def test_select_relevant_wildfires_angular_decay_grades_upwind():
     """Track C Part 2: equal-size, equidistant fires rank strictly by angular
     alignment to the upwind bearing (on-axis > 45 deg off > 90 deg off) instead
@@ -225,6 +226,7 @@ def test_select_relevant_wildfires_angular_decay_grades_upwind():
     assert incidents[0]["relevance"] == pytest.approx(incidents[2]["relevance"] * 4.0, rel=0.05)
 
 
+@pytest.mark.honesty
 def test_fetch_wfigs_present_selects_top_and_alignment():
     geojson = _geojson([_wf_feature("Grasshopper Fire", -120.0, 45.0, size=35000, contained=19)])
     with patch("backend.services.wfigs.httpx.AsyncClient", return_value=_mock_client(geojson)):

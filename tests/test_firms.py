@@ -437,6 +437,7 @@ def test_fetch_firms_high_confidence_outranks_nominal():
     assert result["nearest"]["confidence"] == "high"
 
 
+@pytest.mark.honesty
 def test_fetch_firms_nearest_is_top_relevance_even_with_upwind_cluster():
     """Track C Part 3: 'nearest' is the top cluster by relevance across ALL
     clusters, so a far larger downwind fire claims the named slot; alignment
@@ -663,6 +664,7 @@ def _grid_cluster_signature(clusters):
     ]
 
 
+@pytest.mark.honesty
 def test_angular_upwind_factor_decays_with_angular_difference():
     """Track C Part 2 (pure function): the upwind multiplier is graded by the
     cosine of the angular difference from the upwind bearing - full 4x on-axis,
@@ -679,6 +681,7 @@ def test_angular_upwind_factor_decays_with_angular_difference():
     assert factor(90.0, 1.0) == 1.0
 
 
+@pytest.mark.honesty
 def test_fetch_firms_angular_decay_on_axis_outranks_off_axis():
     """Track C Part 2 integration: three identical-FRP, equidistant clusters at
     0, 45, and 90 degrees off the upwind bearing rank strictly by angular

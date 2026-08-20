@@ -17,6 +17,8 @@ def _openaq_signal(**overrides):
         "co_ppm": None,
         "so2_ppb": None,
         "pm25_pm10_ratio": None,
+        "ratio_source": None,
+        "ratio_monitor_distance_km": None,
         "daily_percentile": None,
         "same_hour_percentile": None,
         "same_hour_median": None,
@@ -165,6 +167,56 @@ def test_openaq_coarse_ratio_boosts_dust():
     assert dust_h["score"] >= 55
     assert dust_h["confidence"] in ["medium", "high"]
     assert hypotheses[0]["id"] == "windblown_dust"
+
+
+def test_airnow_ratio_distance_used_in_dominance_text():
+    """The fine/coarse dominance lines name the AirNow monitor and its distance
+    when the ratio is AirNow-sourced, never the OpenAQ monitor's distance."""
+    observation = {"aqi": 140, "primary_pollutant": "PM10", "category": "Unhealthy for Sensitive Groups"}
+    signals = _with_openaq(
+        DUST_SIGNALS,
+        _openaq_signal(
+            pm25=34.0,
+            pm10=170.0,
+            pm25_pm10_ratio=0.2,
+            monitor={"name": "OpenAQ Monitor", "distance_km": 5.0, "provider": "AirNow"},
+            ratio_source="airnow",
+            ratio_monitor_distance_km=3.0,
+        ),
+    )
+    hypotheses, _ = score_hypotheses(observation, signals)
+    dust_h = next(h for h in hypotheses if h["id"] == "windblown_dust")
+    smoke_h = next(h for h in hypotheses if h["id"] == "wildfire_smoke")
+
+    dust_line = next(s for s in dust_h["support"] if "small fraction of PM10" in s)
+    assert "AirNow monitor 3 km away" in dust_line
+    assert "nearest reporting monitor 5 km away" not in dust_line
+
+    smoke_line = next(a for a in smoke_h["against"] if "coarse-particle dominated" in a)
+    assert "AirNow monitor 3 km away" in smoke_line
+    assert "nearest reporting monitor 5 km away" not in smoke_line
+
+
+def test_airnow_fine_ratio_distance_in_urban_line():
+    """Fine-dominance urban support also names the AirNow monitor when the ratio
+    is AirNow-sourced, rather than the OpenAQ monitor."""
+    observation = {"aqi": 90, "primary_pollutant": "PM2.5", "category": "Moderate"}
+    signals = _with_openaq(
+        URBAN_SIGNALS,
+        _openaq_signal(
+            pm25=22.0,
+            pm10=25.0,
+            pm25_pm10_ratio=0.88,
+            monitor={"name": "OpenAQ Monitor", "distance_km": 8.0, "provider": "AirNow"},
+            ratio_source="airnow",
+            ratio_monitor_distance_km=4.0,
+        ),
+    )
+    hypotheses, _ = score_hypotheses(observation, signals)
+    urban_h = next(h for h in hypotheses if h["id"] == "urban_industrial_pm")
+    line = next(s for s in urban_h["support"] if "fine-particle dominated" in s)
+    assert "AirNow monitor 4 km away" in line
+    assert "nearest reporting monitor 8 km away" not in line
 
 
 def test_openaq_fine_ratio_boosts_smoke_with_plume_evidence():
@@ -386,6 +438,7 @@ def test_openaq_unavailable_is_identical_to_no_signal():
     assert baseline_h == with_h
     assert baseline_q == with_q
 
+@pytest.mark.honesty
 def test_uncorroborated_news_fire_stays_low():
     """Uncorroborated news hit (clean AOD + no FIRMS) must NOT count as a fire vote or elevate smoke."""
     observation = {"aqi": 85, "primary_pollutant": "PM2.5", "category": "Moderate"}
@@ -420,6 +473,7 @@ def test_corroborated_news_fire_elevates_smoke():
     assert any("Creek Fire" in s for s in smoke_h["support"])
 
 
+@pytest.mark.honesty
 def test_news_only_place_desc_tagged_unknown_size():
     """Track C Part 1: a news-sourced name rendered as the place pointer must be
     tagged news-reported/unknown-size, never a bare authoritative 'Incident: X'
@@ -456,6 +510,7 @@ def test_clean_aod_elevated_pm_adds_smoke_against():
     smoke_h = next(h for h in hypotheses if h["id"] == "wildfire_smoke")
     assert any("Clear column overhead" in a for a in smoke_h["against"])
 
+@pytest.mark.honesty
 def test_aod_only_medium_haze_urban_beats_smoke():
     """Manhattan-shaped case: medium AOD, no FIRMS, junk news name - urban should win, smoke not high."""
     observation = {"aqi": 56, "primary_pollutant": "PM2.5", "category": "Moderate"}
@@ -681,6 +736,7 @@ def test_firms_outage_does_not_flip_urban_to_smoke():
     assert hypotheses[0]["id"] == "urban_industrial_pm"
 
 
+@pytest.mark.honesty
 def test_far_downwind_wfigs_does_not_corroborate_transport():
     """A WFIGS fire 250 mi downwind must not corroborate a news name or boost
     smoke - it stays a weak (55) signal and urban wins."""
@@ -750,6 +806,7 @@ def test_rural_gate_tracer_lifts_to_medium_but_not_high():
     assert urban_h["score"] == 55
 
 
+@pytest.mark.honesty
 def test_firms_unavailable_is_not_verified_absence():
     """A down FIRMS feed must not read as 'no nearby hotspots' - surface an open question instead."""
     observation = {"aqi": 120, "primary_pollutant": "PM2.5", "category": "Unhealthy for Sensitive Groups"}
@@ -791,6 +848,7 @@ def test_heavy_aod_no_firms_does_not_crown_smoke():
     assert hypotheses[0]["id"] == "urban_industrial_pm"
     assert urban_h["score"] > smoke_h["score"]
 
+@pytest.mark.honesty
 def test_light_haze_extreme_pm_without_fire_does_not_crown_smoke():
     """Burns-shaped: light AOD (~0.38) + Very Unhealthy PM, no FIRMS - smoke
     can no longer be crowned on AOD alone and falls to low; urban wins."""
@@ -859,6 +917,7 @@ def test_nearby_non_upwind_firms_elevates_smoke():
 # PM10-primary days without a fine/coarse ratio must cap smoke in favor of dust.
 # ---------------------------------------------------------------------------
 
+@pytest.mark.honesty
 def test_aod_only_heavy_plume_no_fire_evidence_smoke_low():
     """Guards B1/B2d: a heavy modeled AOD plume with elevated PM and NO verified
     fire evidence falls through to low/25 instead of the old medium/70."""
@@ -879,6 +938,7 @@ def test_aod_only_heavy_plume_no_fire_evidence_smoke_low():
     assert smoke_h["confidence"] != "high"
 
 
+@pytest.mark.honesty
 def test_aod_does_not_count_as_fire_signal_for_high_smoke():
     """Guards B1: heavy AOD + exactly one real fire vote (a single upwind FIRMS
     hotspot) must stay medium/65 - the old behavior counted AOD as a second
@@ -900,6 +960,7 @@ def test_aod_does_not_count_as_fire_signal_for_high_smoke():
     assert smoke_h["confidence"] != "high"
 
 
+@pytest.mark.honesty
 def test_ratio_missing_windy_pm10_primary_caps_smoke_dust_ranks_first():
     """Guards C: PM10-primary + elevated + high wind with NO fine/coarse ratio
     caps smoke at 45/low even with fire evidence, and windblown dust wins.
@@ -929,6 +990,7 @@ def test_ratio_missing_windy_pm10_primary_caps_smoke_dust_ranks_first():
     assert any("no fine/coarse particle ratio" in q for q in open_questions)
 
 
+@pytest.mark.honesty
 def test_fine_ratio_present_prevents_ratio_missing_dust_cap():
     """Regression guard: fine_dominated (ratio >= 0.70) + elevated PM + smoke
     corroboration must NOT be capped by the ratio-missing dust rule."""
@@ -994,6 +1056,7 @@ def test_upwind_wfigs_heavy_aod_non_extreme_pm_medium_not_high():
     assert smoke_h["score"] != 80
 
 
+@pytest.mark.honesty
 def test_openaq_down_windy_pm10_primary_caps_smoke_dust_first():
     """OpenAQ entirely down: pm10-primary + elevated + high wind + two fire
     signals leaves no fine/coarse ratio, so the honesty cap still fires and
@@ -1020,6 +1083,7 @@ def test_openaq_down_windy_pm10_primary_caps_smoke_dust_first():
     assert any("cannot be confirmed against a windblown-dust alternative" in a for a in smoke_h["against"])
 
 
+@pytest.mark.honesty
 def test_calm_pm10_primary_ratio_missing_does_not_cap_smoke():
     """Without high wind, a missing fine/coarse ratio must NOT cap smoke: the
     dust alternative lacks lofting conditions, so fire evidence may still crown."""
@@ -1043,6 +1107,7 @@ def test_calm_pm10_primary_ratio_missing_does_not_cap_smoke():
     assert not any("no fine/coarse particle ratio" in q for q in open_questions)
 
 
+@pytest.mark.honesty
 def test_aod_only_light_haze_extreme_pm_urban_medium_40():
     """ISSUE 1 pin: light haze + AQI >= 150 + no fire evidence routes to the
     light-haze branch and demotes urban to medium/40, never high/75."""
@@ -1061,6 +1126,7 @@ def test_aod_only_light_haze_extreme_pm_urban_medium_40():
     assert urban_h["score"] != 75
 
 
+@pytest.mark.honesty
 def test_aod_only_heavy_plume_urban_medium_50():
     """ISSUE 1 pin: heavy AOD with no fire evidence routes to the heavy-haze
     branch and caps urban at medium/50, never high/75."""
@@ -1079,6 +1145,7 @@ def test_aod_only_heavy_plume_urban_medium_50():
     assert urban_h["score"] != 75
 
 
+@pytest.mark.honesty
 def test_downwind_nearest_place_desc_says_nearby_not_upwind():
     """Track C ISSUE 1: ``firms_upwind`` (an upwind cluster exists) still gates
     the confidence ladder, but the place pointer names the strongest OVERALL
@@ -1106,3 +1173,204 @@ def test_downwind_nearest_place_desc_says_nearby_not_upwind():
     # The place pointer describes the named downwind cluster, NOT 'Upwind'.
     assert smoke_h["place"]["description"] == "Nearby hotspots 55.0 mi S"
     assert "Upwind" not in smoke_h["place"]["description"]
+
+
+@pytest.mark.honesty
+def test_dust_confirmed_flag_beats_high_smoke():
+    """Gap 3 positive: gust >= 40 mph over antecedent-dry ground (precip <= 0.6
+    in) on a PM10-primary elevated day CONFIRMS windblown dust, forcing it to
+    high/>=85 and ranking it first even though two fire signals make smoke
+    otherwise high/90."""
+    observation = {"aqi": 140, "primary_pollutant": "PM10", "category": "Unhealthy for Sensitive Groups"}
+    signals = [
+        {"id": "aerosol_plume", "status": "present", "aod_value": 0.65, "density": "medium"},
+        {"id": "hms_smoke", "status": "present", "density": "medium"},
+        {"id": "firms_upwind", "status": "present", "count": 3, "alignment": "upwind",
+         "nearest": {"distance_miles": 45.0, "bearing": "NW", "distance_km": 72.4}},
+        {"id": "wind", "status": "present", "speed_mph": 8.0, "direction_deg": 270.0,
+         "wind_gust_mph": 45.0, "precip_30d_in": 0.1},
+        {"id": "surface_pm_level", "status": "present", "primary": True, "pm10_primary": True, "pm25_primary": False, "elevated": True},
+        {"id": "ozone_heat", "status": "absent", "primary": False, "hot_day": False, "temperature_f": 75.0},
+        _unavailable_openaq_signal(),
+    ]
+    hypotheses, _ = score_hypotheses(observation, signals)
+    smoke_h = next(h for h in hypotheses if h["id"] == "wildfire_smoke")
+    dust_h = next(h for h in hypotheses if h["id"] == "windblown_dust")
+    # Sanity: without the flag the smoke ladder alone would be high/90.
+    assert smoke_h["score"] == 90
+    # The confirmation forces dust high, scores >= 85, and ranks first.
+    assert dust_h["confidence"] == "high"
+    assert dust_h["score"] >= 85
+    assert dust_h["score"] > smoke_h["score"]
+    assert hypotheses[0]["id"] == "windblown_dust"
+    # Support line names the gust/dry confirmation; smoke carries the against line.
+    assert any("confirms windblown dust" in s for s in dust_h["support"])
+    assert any("Dust is confirmed over smoke" in a for a in smoke_h["against"])
+
+
+@pytest.mark.honesty
+def test_dust_confirmed_flag_does_not_fire_wet_ground():
+    """Gap 3 negative: same gusty PM10-primary day but 30-day precip of 2.0 in
+    (wet) must NOT force dust high - the flag does not fire and smoke keeps the
+    top spot."""
+    observation = {"aqi": 140, "primary_pollutant": "PM10", "category": "Unhealthy for Sensitive Groups"}
+    signals = [
+        {"id": "aerosol_plume", "status": "present", "aod_value": 0.65, "density": "medium"},
+        {"id": "hms_smoke", "status": "present", "density": "medium"},
+        {"id": "firms_upwind", "status": "present", "count": 3, "alignment": "upwind",
+         "nearest": {"distance_miles": 45.0, "bearing": "NW", "distance_km": 72.4}},
+        {"id": "wind", "status": "present", "speed_mph": 8.0, "direction_deg": 270.0,
+         "wind_gust_mph": 45.0, "precip_30d_in": 2.0},
+        {"id": "surface_pm_level", "status": "present", "primary": True, "pm10_primary": True, "pm25_primary": False, "elevated": True},
+        {"id": "ozone_heat", "status": "absent", "primary": False, "hot_day": False, "temperature_f": 75.0},
+        _unavailable_openaq_signal(),
+    ]
+    hypotheses, _ = score_hypotheses(observation, signals)
+    smoke_h = next(h for h in hypotheses if h["id"] == "wildfire_smoke")
+    dust_h = next(h for h in hypotheses if h["id"] == "windblown_dust")
+    assert hypotheses[0]["id"] == "wildfire_smoke"
+    assert smoke_h["confidence"] == "high"
+    assert smoke_h["score"] == 90
+    # The flag must not fire: dust stays medium from the ordinary ladder.
+    assert dust_h["confidence"] != "high"
+    assert dust_h["score"] < 85
+    assert not any("confirms windblown dust" in s for s in dust_h["support"])
+    assert not any("Dust is confirmed over smoke" in a for a in smoke_h["against"])
+
+
+# ---------------------------------------------------------------------------
+# Gap 3b: NWS dust alert / nearby METAR blowing-dust confirmations.
+# One-sided signals: presence confirms dust, absence means nothing.
+# ---------------------------------------------------------------------------
+
+def _external_dust_signals(**overrides):
+    """A PM10-primary, elevated day with a verified smoke plume (HMS medium
+    would otherwise crown smoke at high/85); dust signals are overridable."""
+    base = [
+        {"id": "aerosol_plume", "status": "present", "aod_value": 0.65, "density": "medium"},
+        {"id": "hms_smoke", "status": "present", "density": "medium"},
+        {"id": "firms_upwind", "status": "absent", "count": 0},
+        {"id": "wind", "status": "present", "speed_mph": 8.0, "direction_deg": 270.0},
+        {"id": "surface_pm_level", "status": "present", "primary": True, "pm10_primary": True,
+         "pm25_primary": False, "elevated": True},
+        {"id": "ozone_heat", "status": "absent", "primary": False, "hot_day": False, "temperature_f": 75.0},
+        _unavailable_openaq_signal(),
+    ]
+    base.append({
+        "id": "nws_dust_alert",
+        "label": "NWS Dust Warning/Advisory",
+        "status": "absent",
+        "event": None,
+        "headline": None,
+    })
+    base.append({
+        "id": "metar_dust",
+        "label": "Nearby Airport Blowing Dust (METAR)",
+        "status": "absent",
+        "station": None,
+        "phenomenon": None,
+    })
+    by_id = {s["id"]: s for s in base}
+    for sig_id, updates in overrides.items():
+        by_id[sig_id].update(updates)
+    return list(by_id.values())
+
+
+@pytest.mark.honesty
+def test_nws_dust_alert_present_confirms_dust_ranks_first():
+    """Gap 3b positive (NWS): an NWS dust warning overlapping a PM10-primary
+    elevated day CONFIRMS windblown dust at high/>=90 and ranks it first over
+    an otherwise-high (85) verified smoke plume."""
+    observation = {"aqi": 140, "primary_pollutant": "PM10", "category": "Unhealthy for Sensitive Groups"}
+    signals = _external_dust_signals(
+        nws_dust_alert={
+            "status": "present",
+            "event": "Dust Storm Warning",
+            "headline": "Dust Storm Warning issued for the El Paso area",
+            "severity": "Severe",
+        },
+    )
+    hypotheses, _ = score_hypotheses(observation, signals)
+    smoke_h = next(h for h in hypotheses if h["id"] == "wildfire_smoke")
+    dust_h = next(h for h in hypotheses if h["id"] == "windblown_dust")
+
+    # Sanity: the verified HMS plume alone would put smoke high/85.
+    assert smoke_h["score"] == 85
+    assert smoke_h["score"] < dust_h["score"]
+    assert dust_h["confidence"] == "high"
+    assert dust_h["score"] >= 90
+    assert hypotheses[0]["id"] == "windblown_dust"
+    assert any("NWS issued a Dust Storm Warning overlapping this location" in s for s in dust_h["support"])
+    assert any("An official/observed dust signal confirms dust over smoke" in a for a in smoke_h["against"])
+
+
+@pytest.mark.honesty
+def test_metar_dust_present_confirms_dust_ranks_first():
+    """Gap 3b positive (METAR): a nearby airport METAR reporting blowing dust
+    CONFIRMS windblown dust at high/>=90 and ranks it first over smoke."""
+    observation = {"aqi": 140, "primary_pollutant": "PM10", "category": "Unhealthy for Sensitive Groups"}
+    signals = _external_dust_signals(
+        metar_dust={
+            "status": "present",
+            "station": "KDUL",
+            "phenomenon": "BLDU",
+            "raw": "METAR KDUL 201151Z 24025KT 2SM BLDU HZ",
+        },
+    )
+    hypotheses, _ = score_hypotheses(observation, signals)
+    smoke_h = next(h for h in hypotheses if h["id"] == "wildfire_smoke")
+    dust_h = next(h for h in hypotheses if h["id"] == "windblown_dust")
+
+    assert smoke_h["score"] < dust_h["score"]
+    assert dust_h["confidence"] == "high"
+    assert dust_h["score"] >= 90
+    assert hypotheses[0]["id"] == "windblown_dust"
+    assert any("A nearby airport reported BLDU (blowing dust)" in s for s in dust_h["support"])
+    assert any("An official/observed dust signal confirms dust over smoke" in a for a in smoke_h["against"])
+
+
+@pytest.mark.honesty
+def test_dust_confirmation_absent_does_not_move_dust():
+    """Gap 3b negative: absent NWS/METAR signals are NOT evidence - dust must
+    be scored exactly as if the feeds were never queried (one-sided signals)."""
+    observation = {"aqi": 140, "primary_pollutant": "PM10", "category": "Unhealthy for Sensitive Groups"}
+    with_signals = _external_dust_signals()
+    without_signals = [dict(s) for s in with_signals if s["id"] not in ("nws_dust_alert", "metar_dust")]
+
+    with_h, _ = score_hypotheses(observation, with_signals)
+    without_h, _ = score_hypotheses(observation, without_signals)
+    assert with_h == without_h
+
+    dust_h = next(h for h in with_h if h["id"] == "windblown_dust")
+    smoke_h = next(h for h in with_h if h["id"] == "wildfire_smoke")
+    # Without confirmation, smoke (85) still beats the ordinary dust ladder (55).
+    assert smoke_h["score"] > dust_h["score"]
+    assert dust_h["confidence"] != "high"
+    assert dust_h["score"] == 55
+    assert not any("An official/observed dust signal confirms dust over smoke" in a for a in smoke_h["against"])
+
+
+@pytest.mark.honesty
+def test_dust_confirmation_requires_elevated_pm10_suspect_day():
+    """Gap 3b guard: an NWS dust alert alone (or METAR BLDU alone) must NOT
+    crown dust on a PM2.5-primary day - the confirmation is gated on a
+    dust-suspect, PM-elevated day."""
+    observation = {"aqi": 140, "primary_pollutant": "PM2.5", "category": "Unhealthy for Sensitive Groups"}
+    signals = [
+        {"id": "aerosol_plume", "status": "present", "aod_value": 0.65, "density": "medium"},
+        {"id": "hms_smoke", "status": "present", "density": "medium"},
+        {"id": "firms_upwind", "status": "absent", "count": 0},
+        {"id": "wind", "status": "present", "speed_mph": 8.0, "direction_deg": 270.0},
+        {"id": "surface_pm_level", "status": "present", "primary": True, "pm10_primary": False,
+         "pm25_primary": True, "elevated": True},
+        {"id": "ozone_heat", "status": "absent", "primary": False, "hot_day": False, "temperature_f": 75.0},
+        {"id": "nws_dust_alert", "status": "present", "event": "Blowing Dust Advisory"},
+        {"id": "metar_dust", "status": "present", "station": "KDUL", "phenomenon": "BLDU"},
+    ]
+    hypotheses, _ = score_hypotheses(observation, signals)
+    dust_h = next(h for h in hypotheses if h["id"] == "windblown_dust")
+    smoke_h = next(h for h in hypotheses if h["id"] == "wildfire_smoke")
+    assert dust_h["confidence"] != "high"
+    assert dust_h["score"] < 90
+    assert smoke_h["score"] > dust_h["score"]
+    assert hypotheses[0]["id"] == "wildfire_smoke"

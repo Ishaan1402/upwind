@@ -56,6 +56,8 @@ def score_hypotheses(
 
     wind_speed = wind.get("speed_mph")
     boundary_layer_height_m = wind.get("boundary_layer_height_m")
+    wind_gust_mph = wind.get("wind_gust_mph")
+    precip_30d_in = wind.get("precip_30d_in")
 
     pm_primary = pm.get("primary", False)
     pm10_primary = pm.get("pm10_primary", False) or ("PM10" in primary)
@@ -113,6 +115,18 @@ def score_hypotheses(
         f" at the nearest reporting monitor {openaq_dist_km:.0f} km away"
         if openaq_dist_km is not None else " at the nearest reporting monitor"
     )
+
+    # The fine/coarse ratio can come from the OpenAQ monitor or from the AirNow
+    # fallback site. The dominance lines must name the monitor that actually
+    # produced the ratio so a distant AirNow site is never implied to be local.
+    if openaq.get("ratio_source") == "airnow":
+        ratio_monitor_distance_km = openaq.get("ratio_monitor_distance_km")
+        ratio_distance_suffix = (
+            f" at the AirNow monitor {ratio_monitor_distance_km:.0f} km away"
+            if ratio_monitor_distance_km is not None else " at the AirNow monitor"
+        )
+    else:
+        ratio_distance_suffix = monitor_distance_suffix
 
     fine_dominated = (
         op_present and not measured_conflict and pm_ratio is not None
@@ -227,7 +241,7 @@ def score_hypotheses(
 
     if fine_dominated and pm_elevated and (aod_present or has_smoke_corroboration):
         smoke_support.append(
-            f"PM is fine-particle dominated{monitor_distance_suffix}, consistent with smoke rather than coarse dust"
+            f"PM is fine-particle dominated{ratio_distance_suffix}, consistent with smoke rather than coarse dust"
         )
 
     if (
@@ -238,7 +252,7 @@ def score_hypotheses(
 
     if coarse_dominated and pm_elevated:
         smoke_against.append(
-            f"PM is coarse-particle dominated{monitor_distance_suffix}, favoring dust over smoke"
+            f"PM is coarse-particle dominated{ratio_distance_suffix}, favoring dust over smoke"
         )
 
     if aod_value >= p.aod_medium and not pm_elevated:
@@ -449,7 +463,7 @@ def score_hypotheses(
 
     if coarse_dominated and pm_elevated:
         dust_support.append(
-            f"PM2.5 is only a small fraction of PM10{monitor_distance_suffix}, consistent with windblown dust"
+            f"PM2.5 is only a small fraction of PM10{ratio_distance_suffix}, consistent with windblown dust"
         )
 
     if pm10_primary and is_high_wind:
@@ -474,6 +488,68 @@ def score_hypotheses(
         "support": dust_support,
         "against": dust_against
     })
+
+    # -----------------------------------------------------------------------
+    # Dust-confirmed flag (Gap 3): the Lamar climatology rule from the offline
+    # eval store (96.9% precision on the IMPROVE answer key). When a
+    # PM10-primary, elevated day has a daily-max gust >= dust_gust_mph_min AND
+    # antecedent 30-day precip <= dust_precip_30d_max_in, windblown dust is
+    # CONFIRMED. This is a POSITIVE confirmation - it raises dust - and is
+    # distinct from the honesty cap that demotes smoke. Applied after the dust
+    # ladder so a confirmed event outranks even an otherwise-high smoke case.
+    # -----------------------------------------------------------------------
+    dust_confirmed = (
+        pm10_primary and pm_elevated
+        and wind_gust_mph is not None and precip_30d_in is not None
+        and wind_gust_mph >= p.dust_gust_mph_min
+        and precip_30d_in <= p.dust_precip_30d_max_in
+    )
+    if dust_confirmed:
+        dust_support.append(
+            f"Gusty wind ({wind_gust_mph:.0f} mph) over dry ground (30-day precip {precip_30d_in:.1f} in) confirms windblown dust"
+        )
+        # Pin above the strongest possible smoke score (90) so confirmation
+        # ranks dust first even when smoke would otherwise be high/90.
+        dust_score = max(dust_score, 95)
+        dust_conf = "high"
+        smoke_against.append(
+            f"Dust is confirmed over smoke: daily-max gust {wind_gust_mph:.0f} mph "
+            f"on antecedent-dry ground (30-day precip {precip_30d_in:.1f} in)"
+        )
+        dust_h = next(h for h in hypotheses if h["id"] == "windblown_dust")
+        dust_h["score"] = dust_score
+        dust_h["confidence"] = dust_conf
+
+    # -----------------------------------------------------------------------
+    # Official/observed dust confirmation (Gap 3b): an NWS dust warning or a
+    # nearby airport METAR reporting blowing dust is a high-precision,
+    # low-recall confirmation. When present on a dust-suspect (PM10-primary or
+    # coarse-dominated) elevated-PM day, it forces windblown dust high/>=90
+    # over any smoke evidence. Absence is NOT evidence: absent/unavailable
+    # statuses leave scoring untouched.
+    # -----------------------------------------------------------------------
+    nws_dust = sig_map.get("nws_dust_alert", {})
+    metar_dust = sig_map.get("metar_dust", {})
+    dust_suspect = pm10_primary or coarse_dominated
+    dust_confirmed_external = (
+        dust_suspect and pm_elevated
+        and (nws_dust.get("status") == "present" or metar_dust.get("status") == "present")
+    )
+    if dust_confirmed_external:
+        if nws_dust.get("status") == "present":
+            event = nws_dust.get("event") or "dust warning"
+            dust_support.append(f"NWS issued a {event} overlapping this location")
+        if metar_dust.get("status") == "present":
+            phenomenon = metar_dust.get("phenomenon") or "BLDU"
+            dust_support.append(
+                f"A nearby airport reported {phenomenon} (blowing dust)"
+            )
+        dust_score = max(dust_score, 90)
+        dust_conf = "high"
+        smoke_against.append("An official/observed dust signal confirms dust over smoke")
+        dust_h = next(h for h in hypotheses if h["id"] == "windblown_dust")
+        dust_h["score"] = dust_score
+        dust_h["confidence"] = dust_conf
 
     # Mode 4: Winter Stagnation & Temperature Inversion
     stagnation_support = []
@@ -560,7 +636,7 @@ def score_hypotheses(
         )
     if fine_dominated and pm_elevated and not (aod_present or has_smoke_corroboration):
         urban_support.append(
-            f"PM is fine-particle dominated{monitor_distance_suffix}, consistent with local combustion or traffic rather than coarse dust"
+            f"PM is fine-particle dominated{ratio_distance_suffix}, consistent with local combustion or traffic rather than coarse dust"
         )
 
     if (

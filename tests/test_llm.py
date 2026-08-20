@@ -1,5 +1,7 @@
 """Deterministic fallback narrative regression tests."""
 
+import pytest
+
 from backend.llm import generate_fallback_narrative, SYSTEM_PROMPT
 from backend.llm_judge import JUDGE_SYSTEM_PROMPT
 
@@ -32,6 +34,7 @@ def test_good_aqi_wfigs_incident_gets_aloft_context():
     assert "aloft" in text
 
 
+@pytest.mark.honesty
 def test_system_prompt_has_no_invented_fire_size_rule():
     """Track C Part 1: the narrative system prompt forbids inventing a size,
     acreage, or rank for news-sourced fire names and forbids the 'cluster of
@@ -41,6 +44,7 @@ def test_system_prompt_has_no_invented_fire_size_rule():
     assert "cluster of smaller fires" in SYSTEM_PROMPT
 
 
+@pytest.mark.honesty
 def test_judge_prompt_flags_invented_fire_size():
     """Track C Part 1: the judge prompt must flag narratives that attribute an
     invented size/acreage/rank to a news-only fire name."""
