@@ -19,6 +19,11 @@ Check the narrative against these rules:
    between the reported AQI and a monitor reading, the narrative must acknowledge it in
    one plain sentence (the AQI is a longer-term average; the monitor reading is current)
    and must not claim the AQI reading is wrong.
+6. Fire size accuracy: if a fire name appears in the evidence only as a news mention
+   (e.g. "Recent news mention of 'X'" or a news-tagged place pointer), the narrative
+   must NOT assign that fire a size, acreage, containment, or rank, and must NOT
+   describe it as a cluster of smaller fires. Flag any invented size or rank as a
+   hallucination.
 
 Respond ONLY with a JSON object with exactly these fields:
 {

@@ -1,5 +1,6 @@
 """Endpoint tests verifying OpenAQ signal wiring in both /api/why paths."""
 
+import asyncio
 import json
 from contextlib import ExitStack
 from unittest.mock import AsyncMock, patch
@@ -44,6 +45,32 @@ FIRMS_RESULT = {
     "alignment": None,
     "details": "none",
 }
+HMS_RESULT = {"status": "absent", "density": None, "details": "no plume"}
+WFIGS_RESULT = {
+    "status": "absent",
+    "incident": None,
+    "count": 0,
+    "alignment": None,
+    "details": "no federal incidents nearby",
+}
+PLACE_RESULT = {
+    "status": "unavailable",
+    "population": None,
+    "rural": None,
+    "details": "no census key in test",
+}
+NWS_RESULT = {
+    "status": "absent",
+    "event": None,
+    "headline": None,
+    "severity": None,
+}
+METAR_RESULT = {
+    "status": "absent",
+    "station": None,
+    "raw": None,
+    "phenomenon": None,
+}
 
 
 def test_why_includes_openaq_signal_and_trace_step():
@@ -51,9 +78,14 @@ def test_why_includes_openaq_signal_and_trace_step():
 
     with patch("backend.engine.signals.fetch_openmeteo_weather", new_callable=AsyncMock, return_value=WEATHER), \
          patch("backend.engine.signals.fetch_aod_signal", new_callable=AsyncMock, return_value=AOD_RESULT), \
+         patch("backend.engine.signals.fetch_hms_smoke", new_callable=AsyncMock, return_value=HMS_RESULT), \
+         patch("backend.engine.signals.fetch_wfigs_incident", new_callable=AsyncMock, return_value=WFIGS_RESULT), \
+         patch("backend.engine.signals.fetch_dust_alert", new_callable=AsyncMock, return_value=NWS_RESULT), \
+         patch("backend.engine.signals.fetch_metar_dust", new_callable=AsyncMock, return_value=METAR_RESULT), \
          patch("backend.engine.signals.fetch_firms_hotspots", new_callable=AsyncMock, return_value=FIRMS_RESULT), \
          patch("backend.engine.signals.search_fire_incident_name", new_callable=AsyncMock, return_value=None), \
          patch("backend.engine.signals.collect_openaq_signal", new_callable=AsyncMock, return_value=PRESENT_SIGNAL), \
+         patch("backend.engine.signals.fetch_place_context", new_callable=AsyncMock, return_value=PLACE_RESULT), \
          patch("backend.routers.why.generate_narrative_briefing", new_callable=AsyncMock, return_value="test narrative"), \
          patch("backend.routers.why.judge_narrative", new_callable=AsyncMock, return_value={"verdict": "pass"}), \
          patch("backend.routers.why.get_cached_narrative", return_value=None), \
@@ -73,17 +105,89 @@ def test_why_includes_openaq_signal_and_trace_step():
     assert any(t["step"] == "openaq_monitors" for t in data["execution_trace"])
 
 
+def test_why_cache_key_includes_aqi_and_pollutant():
+    """Same location + hour must not share a narrative across different AQI levels."""
+    from backend.main import app
+
+    captured = {}
+    def fake_set(key, narrative, payload, verdict=None):
+        captured["key"] = key
+
+    with patch("backend.engine.signals.fetch_openmeteo_weather", new_callable=AsyncMock, return_value=WEATHER), \
+         patch("backend.engine.signals.fetch_aod_signal", new_callable=AsyncMock, return_value=AOD_RESULT), \
+         patch("backend.engine.signals.fetch_hms_smoke", new_callable=AsyncMock, return_value=HMS_RESULT), \
+         patch("backend.engine.signals.fetch_wfigs_incident", new_callable=AsyncMock, return_value=WFIGS_RESULT), \
+         patch("backend.engine.signals.fetch_dust_alert", new_callable=AsyncMock, return_value=NWS_RESULT), \
+         patch("backend.engine.signals.fetch_metar_dust", new_callable=AsyncMock, return_value=METAR_RESULT), \
+         patch("backend.engine.signals.fetch_firms_hotspots", new_callable=AsyncMock, return_value=FIRMS_RESULT), \
+         patch("backend.engine.signals.search_fire_incident_name", new_callable=AsyncMock, return_value=None), \
+         patch("backend.engine.signals.collect_openaq_signal", new_callable=AsyncMock, return_value=PRESENT_SIGNAL), \
+         patch("backend.engine.signals.fetch_place_context", new_callable=AsyncMock, return_value=PLACE_RESULT), \
+         patch("backend.routers.why.generate_narrative_briefing", new_callable=AsyncMock, return_value="test narrative"), \
+         patch("backend.routers.why.judge_narrative", new_callable=AsyncMock, return_value={"verdict": "pass"}), \
+         patch("backend.routers.why.get_cached_narrative", return_value=None), \
+         patch("backend.routers.why.set_cached_narrative", side_effect=fake_set):
+        with TestClient(app) as client:
+            resp = client.post(
+                "/api/why",
+                json={
+                    "location": SMOKE_LOCATION,
+                    "observation": {"aqi": 180, "primary_pollutant": "PM2.5", "category": "Unhealthy"},
+                },
+            )
+
+    assert resp.status_code == 200
+    key = captured.get("key", "")
+    assert "_180_" in key
+    assert "PM2.5" in key
+
+
+def test_skipped_web_search_still_resolves():
+    """On clean-air days the gated web search is skipped but must still emit a
+    tool_done so its card resolves instead of spinning forever."""
+    from backend.engine.signals import iter_evidence_signals
+
+    async def collect():
+        events = []
+        async for kind, payload in iter_evidence_signals(
+            {"lat": 34.05, "lon": -118.24, "zip_code": "90012", "state": "CA", "city": "Los Angeles"},
+            {"aqi": 42, "primary_pollutant": "O3", "category": "Good"},
+        ):
+            events.append((kind, payload))
+        return events
+
+    with patch("backend.engine.signals.fetch_openmeteo_weather", new_callable=AsyncMock, return_value=WEATHER), \
+         patch("backend.engine.signals.fetch_aod_signal", new_callable=AsyncMock, return_value=AOD_RESULT), \
+         patch("backend.engine.signals.fetch_hms_smoke", new_callable=AsyncMock, return_value=HMS_RESULT), \
+         patch("backend.engine.signals.fetch_wfigs_incident", new_callable=AsyncMock, return_value=WFIGS_RESULT), \
+         patch("backend.engine.signals.fetch_dust_alert", new_callable=AsyncMock, return_value=NWS_RESULT), \
+         patch("backend.engine.signals.fetch_metar_dust", new_callable=AsyncMock, return_value=METAR_RESULT), \
+         patch("backend.engine.signals.fetch_firms_hotspots", new_callable=AsyncMock, return_value=FIRMS_RESULT), \
+         patch("backend.engine.signals.collect_openaq_signal", new_callable=AsyncMock, return_value=PRESENT_SIGNAL), \
+         patch("backend.engine.signals.fetch_place_context", new_callable=AsyncMock, return_value=PLACE_RESULT), \
+         patch("backend.engine.signals.search_fire_incident_name", new_callable=AsyncMock, return_value=None):
+        events = asyncio.run(collect())
+
+    web_done = [p for k, p in events if k == "tool_done" and p["step"] == "web_search"]
+    assert web_done and web_done[0]["status"] == "absent"
+
+
 def test_stream_emits_openaq_events_and_signal():
     from backend.main import app
 
     async def fake_stream(*args, **kwargs):
         yield "test narrative"
 
-    with patch("backend.routers.why.fetch_openmeteo_weather", new_callable=AsyncMock, return_value=WEATHER), \
-         patch("backend.routers.why.fetch_aod_signal", new_callable=AsyncMock, return_value=AOD_RESULT), \
-         patch("backend.routers.why.fetch_firms_hotspots", new_callable=AsyncMock, return_value=FIRMS_RESULT), \
-         patch("backend.routers.why.search_fire_incident_name", new_callable=AsyncMock, return_value=None), \
-         patch("backend.routers.why.collect_openaq_signal", new_callable=AsyncMock, return_value=PRESENT_SIGNAL), \
+    with patch("backend.engine.signals.fetch_openmeteo_weather", new_callable=AsyncMock, return_value=WEATHER), \
+         patch("backend.engine.signals.fetch_aod_signal", new_callable=AsyncMock, return_value=AOD_RESULT), \
+         patch("backend.engine.signals.fetch_hms_smoke", new_callable=AsyncMock, return_value=HMS_RESULT), \
+         patch("backend.engine.signals.fetch_wfigs_incident", new_callable=AsyncMock, return_value=WFIGS_RESULT), \
+         patch("backend.engine.signals.fetch_dust_alert", new_callable=AsyncMock, return_value=NWS_RESULT), \
+         patch("backend.engine.signals.fetch_metar_dust", new_callable=AsyncMock, return_value=METAR_RESULT), \
+         patch("backend.engine.signals.fetch_firms_hotspots", new_callable=AsyncMock, return_value=FIRMS_RESULT), \
+         patch("backend.engine.signals.search_fire_incident_name", new_callable=AsyncMock, return_value=None), \
+         patch("backend.engine.signals.collect_openaq_signal", new_callable=AsyncMock, return_value=PRESENT_SIGNAL), \
+         patch("backend.engine.signals.fetch_place_context", new_callable=AsyncMock, return_value=PLACE_RESULT), \
          patch("backend.routers.why.generate_narrative_briefing_stream", side_effect=fake_stream), \
          patch("backend.routers.why.get_cached_narrative", return_value=None), \
          patch("backend.routers.why.set_cached_narrative", return_value=None), \
@@ -125,16 +229,16 @@ def test_stream_and_post_share_identical_signals():
     engine_patches = [
         patch("backend.engine.signals.fetch_openmeteo_weather", new_callable=AsyncMock, return_value=WEATHER),
         patch("backend.engine.signals.fetch_aod_signal", new_callable=AsyncMock, return_value=AOD_RESULT),
+        patch("backend.engine.signals.fetch_hms_smoke", new_callable=AsyncMock, return_value=HMS_RESULT),
+        patch("backend.engine.signals.fetch_wfigs_incident", new_callable=AsyncMock, return_value=WFIGS_RESULT),
+        patch("backend.engine.signals.fetch_dust_alert", new_callable=AsyncMock, return_value=NWS_RESULT),
+        patch("backend.engine.signals.fetch_metar_dust", new_callable=AsyncMock, return_value=METAR_RESULT),
         patch("backend.engine.signals.fetch_firms_hotspots", new_callable=AsyncMock, return_value=FIRMS_RESULT),
         patch("backend.engine.signals.search_fire_incident_name", new_callable=AsyncMock, return_value="Test Fire"),
         patch("backend.engine.signals.collect_openaq_signal", new_callable=AsyncMock, return_value=PRESENT_SIGNAL),
+        patch("backend.engine.signals.fetch_place_context", new_callable=AsyncMock, return_value=PLACE_RESULT),
     ]
     router_patches = [
-        patch("backend.routers.why.fetch_openmeteo_weather", new_callable=AsyncMock, return_value=WEATHER),
-        patch("backend.routers.why.fetch_aod_signal", new_callable=AsyncMock, return_value=AOD_RESULT),
-        patch("backend.routers.why.fetch_firms_hotspots", new_callable=AsyncMock, return_value=FIRMS_RESULT),
-        patch("backend.routers.why.search_fire_incident_name", new_callable=AsyncMock, return_value="Test Fire"),
-        patch("backend.routers.why.collect_openaq_signal", new_callable=AsyncMock, return_value=PRESENT_SIGNAL),
         patch("backend.routers.why.generate_narrative_briefing", new_callable=AsyncMock, return_value="test"),
         patch("backend.routers.why.generate_narrative_briefing_stream", side_effect=fake_stream),
         patch("backend.routers.why.judge_narrative", new_callable=AsyncMock, return_value={"verdict": "pass"}),

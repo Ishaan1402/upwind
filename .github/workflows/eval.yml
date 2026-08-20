@@ -2,8 +2,10 @@ name: Narrative Eval
 
 on:
   schedule:
-    # Daily 06:00 UTC regression eval of the fixed scenario corpus.
-    - cron: '0 6 * * *'
+    # Daily 11:00 UTC regression eval of the fixed scenario corpus.
+    # 11:00 UTC is off-peak for DeepSeek billing (peak = 01:00-04:00 UTC and
+    # 06:00-10:00 UTC; the old 06:00 UTC run fell inside peak).
+    - cron: '0 11 * * *'
   workflow_dispatch:
     inputs:
       judge_model:

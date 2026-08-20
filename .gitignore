@@ -16,10 +16,11 @@ __pycache__/
 .coverage
 htmlcov/
 
-# App caches / local DB (auto-created at runtime — do not commit)
+# App caches and local database files
 backend/cache.db
 upwind.db
 *.db-journal
+backend/eval/accuracy/data/
 
 # Frontend build & deps (also covered under frontend/.gitignore)
 frontend/node_modules/
@@ -32,6 +33,10 @@ Thumbs.db
 .idea/
 .vscode/*
 !.vscode/extensions.json
+
+.worktrees/
+
+.reasonix/
 
 # Logs
 *.log

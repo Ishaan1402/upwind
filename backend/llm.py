@@ -12,10 +12,11 @@ Rules:
 5. Grounding: Ground every statement strictly in the provided signals[], hypotheses[], and open_questions[]. Never invent unlisted fires or industrial plants.
 6. Actionable Takeaway: End with a warm, 1-sentence practical health tip tailored to the AQI category.
 7. Good AQI Rule (AQI <= 50): When ground AQI is 50 or below, state clearly in your very first sentence that surface air is healthy and clean. Do NOT write as if there is elevated air pollution to explain. If satellite feeds or news mention distant fires or high-altitude smoke, frame them strictly as 'aloft or regional context' that has not impacted ground breathing air.
-8. Fire Name Corroboration: Only state that a named wildfire is affecting ground air if support lists nearby thermal hotspots (not news or haze alone). Overhead haze without nearby fires should be framed as regional/urban particles, not a confirmed distant wildfire.
+8. Fire Name Corroboration: Only state that a named wildfire is affecting ground air if support lists nearby thermal hotspots, a NOAA smoke-plume analysis, or a federal incident registry listing. News or haze alone is not enough; overhead haze without verified fire evidence should be framed as regional/urban particles, not a confirmed distant wildfire.
 9. No Invented Transport: Do NOT invent transport mechanisms (e.g. trapping by light winds or shallow boundary layer) unless those appear in the top hypothesis's support list.
 10. Unverified News Handling: If open_questions mention an unverified news fire, treat it as uncertainty or distant context, not the primary cause.
 11. Reading Conflicts: If open_questions mention a mismatch between the reported AQI and a monitor reading, acknowledge it in one plain sentence that explains the difference (the AQI is a longer-term average; the monitor reading is current), and do not present it as a reason to doubt the overall AQI verdict.
+12. No Invented Fire Size: Never assign a size, acreage, or rank to a fire whose name is sourced only from news headlines. If a fire's size is unknown, say the size is unknown - do not invent one, and do not describe it as a cluster of smaller fires.
 """
 
 def generate_fallback_narrative(
@@ -32,9 +33,9 @@ def generate_fallback_narrative(
 
     if aqi_val <= 50:
         text = f"Air quality in {loc_name} is currently Good (AQI {aqi_val}). Breathing air at the ground level is clean and healthy. "
-        aod_sig = next((s for s in signals if s.get("id") == "aerosol_plume"), {})
-        firms_sig = next((s for s in signals if s.get("id") == "firms_upwind"), {})
-        if aod_sig.get("status") == "present" or firms_sig.get("status") == "present":
+        # Check all satellite and ground smoke feeds for clean ground aloft context
+        aloft_feeds = ("aerosol_plume", "firms_upwind", "hms_smoke", "wfigs_incident")
+        if any(s.get("status") == "present" for s in signals if s.get("id") in aloft_feeds):
             text += "Satellites detect some high-altitude smoke or regional fire activity, but it remains aloft without affecting ground air. "
         text += "\n\nIt's a great day to enjoy outdoor activities!"
         return text

@@ -68,24 +68,60 @@ def test_rate_limiter_why_stream_burst(client):
     with (
         patch("backend.middleware.rate_limit.TRUST_PROXY", True),
         patch("backend.middleware.rate_limit.RATE_LIMIT_WHY_PER_HOUR", 2),
-        patch("backend.routers.why.fetch_openmeteo_weather", new_callable=AsyncMock, return_value={
+        patch("backend.engine.signals.fetch_openmeteo_weather", new_callable=AsyncMock, return_value={
             "wind_speed_mph": 5.0,
             "wind_direction_deg": 180.0,
             "temperature_f": 70.0,
             "boundary_layer_height_m": 800,
         }),
-        patch("backend.routers.why.fetch_aod_signal", new_callable=AsyncMock, return_value={
+        patch("backend.engine.signals.fetch_aod_signal", new_callable=AsyncMock, return_value={
             "status": "absent",
             "details": "none",
         }),
-        patch("backend.routers.why.fetch_firms_hotspots", new_callable=AsyncMock, return_value={
+        patch("backend.engine.signals.fetch_firms_hotspots", new_callable=AsyncMock, return_value={
             "status": "absent",
             "count": 0,
             "total_count": 0,
             "hotspots": [],
             "details": "none",
         }),
-        patch("backend.routers.why.search_fire_incident_name", new_callable=AsyncMock, return_value=None),
+        patch("backend.engine.signals.fetch_hms_smoke", new_callable=AsyncMock, return_value={
+            "status": "absent",
+            "density": None,
+            "details": "no plume",
+        }),
+        patch("backend.engine.signals.fetch_wfigs_incident", new_callable=AsyncMock, return_value={
+            "status": "absent",
+            "incident": None,
+            "count": 0,
+            "alignment": None,
+            "details": "none",
+        }),
+        patch("backend.engine.signals.fetch_dust_alert", new_callable=AsyncMock, return_value={
+            "status": "absent",
+            "event": None,
+            "headline": None,
+            "severity": None,
+        }),
+        patch("backend.engine.signals.fetch_metar_dust", new_callable=AsyncMock, return_value={
+            "status": "absent",
+            "station": None,
+            "raw": None,
+            "phenomenon": None,
+        }),
+        patch("backend.engine.signals.collect_openaq_signal", new_callable=AsyncMock, return_value={
+            "id": "openaq_concentrations",
+            "label": "Local Monitor Concentrations (OpenAQ)",
+            "status": "unavailable",
+            "details": "none",
+        }),
+        patch("backend.engine.signals.fetch_place_context", new_callable=AsyncMock, return_value={
+            "status": "unavailable",
+            "population": None,
+            "rural": None,
+            "details": "none",
+        }),
+        patch("backend.engine.signals.search_fire_incident_name", new_callable=AsyncMock, return_value=None),
         patch("backend.routers.why.get_cached_narrative", return_value="Cached brief."),
     ):
         statuses = [

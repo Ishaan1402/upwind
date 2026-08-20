@@ -1,9 +1,8 @@
 import React, { useEffect, useState } from 'react';
 import type { CoverageInfo, LocationInfo, ObservationInfo, SignalItem, HypothesisItem } from '../types/aqi';
 import { streamWhyExplanation } from '../services/api';
-import { X, AlertCircle, Sparkles, CheckCircle2, XCircle, Loader2, Radio, Flame, Wind, Cpu, Search, Gauge, ChevronDown, ChevronUp, Circle } from 'lucide-react';
+import { X, AlertCircle, Sparkles, CheckCircle2, XCircle, Loader2, Radio, Flame, Wind, Cpu, Search, Gauge, CloudFog, Flag, Users, ChevronDown, ChevronUp, Circle } from 'lucide-react';
 
-// Open Questions is deprecated for now
 interface WhyDrawerProps {
   isOpen: boolean;
   onClose: () => void;
@@ -11,7 +10,7 @@ interface WhyDrawerProps {
   observation: ObservationInfo | null;
   coverage?: CoverageInfo | null;
   observationToken?: string | null;
-  onSignalsReady?: (data: { signals: SignalItem[]; hypotheses: HypothesisItem[]; open_questions: string[]; map_layers?: any; execution_trace?: any[]; coverage?: CoverageInfo }) => void;
+  onSignalsReady?: (data: { signals: SignalItem[]; hypotheses: HypothesisItem[]; open_questions: string[]; map_layers?: any; execution_trace?: any[]; coverage?: CoverageInfo; total_ms?: number }) => void;
 }
 
 interface InternalToolStep {
@@ -26,9 +25,12 @@ interface InternalToolStep {
 const DEFAULT_STEPS: InternalToolStep[] = [
   { step: 'weather_vector', label: 'Wind & temperature', status: 'pending', icon: Wind },
   { step: 'aod_density', label: 'Aerosol density (AOD)', status: 'pending', icon: Radio },
-  { step: 'firms_scan', label: 'Upwind fire hotspots', status: 'pending', icon: Flame },
-  { step: 'web_search', label: 'News & incident search', status: 'pending', icon: Search },
+  { step: 'hms_scan', label: 'Smoke plume analysis', status: 'pending', icon: CloudFog },
   { step: 'openaq_monitors', label: 'Monitor concentrations', status: 'pending', icon: Gauge },
+  { step: 'place_context', label: 'Local population context', status: 'pending', icon: Users },
+  { step: 'web_search', label: 'News & incident search', status: 'pending', icon: Search },
+  { step: 'wfigs_scan', label: 'Fire incident registry', status: 'pending', icon: Flag },
+  { step: 'firms_scan', label: 'Upwind fire hotspots', status: 'pending', icon: Flame },
   { step: 'score_hypotheses', label: 'Scoring hypotheses', status: 'pending', icon: Cpu }
 ];
 
@@ -42,6 +44,7 @@ export const WhyDrawer: React.FC<WhyDrawerProps> = ({
   onSignalsReady: onSignalsReadyProp
 }) => {
   const [toolSteps, setToolSteps] = useState<InternalToolStep[]>(DEFAULT_STEPS);
+  const [totalWallMs, setTotalWallMs] = useState<number>(0);
   const [isTraceCollapsed, setIsTraceCollapsed] = useState<boolean>(false);
   const [signals, setSignals] = useState<SignalItem[]>([]);
   const [hypotheses, setHypotheses] = useState<HypothesisItem[]>([]);
@@ -49,7 +52,7 @@ export const WhyDrawer: React.FC<WhyDrawerProps> = ({
   const [isStreamingLLM, setIsStreamingLLM] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
 
-  // Drag-to-dismiss gesture state & refs for mobile bottom sheet
+  // Drag gesture state for mobile bottom sheet
   const [dragOffsetY, setDragOffsetY] = useState<number>(0);
   const [isDragging, setIsDragging] = useState<boolean>(false);
   const [isClosing, setIsClosing] = useState<boolean>(false);
@@ -58,7 +61,7 @@ export const WhyDrawer: React.FC<WhyDrawerProps> = ({
 
   const handlePointerDown = (e: React.PointerEvent) => {
     if (e.button !== undefined && e.button !== 0) return;
-    // Strictly isolate drag gesture to mobile viewports (<= 768px)
+    // Restrict drag gesture to mobile viewports
     if (typeof window !== 'undefined' && window.innerWidth > 768) return;
     setIsDragging(true);
     setIsClosing(false);
@@ -88,7 +91,7 @@ export const WhyDrawer: React.FC<WhyDrawerProps> = ({
 
     const finalDeltaY = Math.max(0, e.clientY - dragStartYRef.current);
     if (finalDeltaY > 80) {
-      // GPU-accelerated slide-down exit animation off the screen before unmounting
+      // Animate slide-down exit on mobile before closing
       requestAnimationFrame(() => {
         setIsClosing(true);
         setTimeout(() => {
@@ -125,6 +128,7 @@ export const WhyDrawer: React.FC<WhyDrawerProps> = ({
 
     // Reset state for new SSE stream
     setToolSteps(DEFAULT_STEPS.map(s => ({ ...s, status: 'pending' })));
+    setTotalWallMs(0);
     setIsTraceCollapsed(false);
     setSignals([]);
     setHypotheses([]);
@@ -137,9 +141,11 @@ export const WhyDrawer: React.FC<WhyDrawerProps> = ({
         setToolSteps(prev => prev.map(s => s.step === data.step ? { ...s, status: 'in_progress' } : s));
       },
       onToolDone: (data) => {
+        const status: InternalToolStep['status'] =
+          data.status === 'absent' || data.status === 'warning' ? data.status : 'done';
         setToolSteps(prev => prev.map(s => s.step === data.step ? {
           ...s,
-          status: 'done',
+          status,
           duration_ms: data.duration_ms,
           result: data.result
         } : s));
@@ -147,6 +153,7 @@ export const WhyDrawer: React.FC<WhyDrawerProps> = ({
       onSignalsReady: (data) => {
         setSignals(data.signals || []);
         setHypotheses(data.hypotheses || []);
+        if (typeof data.total_ms === 'number') setTotalWallMs(data.total_ms);
         onSignalsReadyProp?.(data);
         setIsStreamingLLM(true);
         // Automatically collapse tool execution accordion so narrative takes center stage
@@ -174,8 +181,21 @@ export const WhyDrawer: React.FC<WhyDrawerProps> = ({
 
   if (!isOpen) return null;
 
-  const totalDuration = toolSteps.reduce((acc, s) => acc + (s.duration_ms || 0), 0);
-  const completedCount = toolSteps.filter(s => s.status === 'done').length;
+  // Display Real-time until backend delivers total wall-clock time
+  const completedCount = toolSteps.filter(s =>
+    s.status === 'done' || s.status === 'absent' || s.status === 'warning'
+  ).length;
+
+  // Wind-dependent steps (WFIGS / FIRMS) can't start until the wind vector resolves
+  const weatherStep = toolSteps.find(s => s.step === 'weather_vector');
+  const weatherResolved = !!weatherStep && (weatherStep.status === 'done' || weatherStep.status === 'warning');
+  const isWaitingOnWind = (step: InternalToolStep) =>
+    (step.step === 'wfigs_scan' || step.step === 'firms_scan') &&
+    step.status === 'pending' && !weatherResolved;
+
+  // Outages are summarized as a muted footnote; only present/absent chips render
+  const gridSignals = signals.filter(sig => sig.status !== 'unavailable');
+  const unavailableCount = signals.filter(sig => sig.status === 'unavailable').length;
 
   return (
     <div className="drawer-overlay" onClick={onClose}>
@@ -220,7 +240,7 @@ export const WhyDrawer: React.FC<WhyDrawerProps> = ({
 
         <div className="drawer-body">
           <div className="trace-section">
-            {/* Collapsible Tool Trace Accordion Bar (auto-collapses when signals are ready) */}
+            {/* Collapsible tool trace bar */}
             {(signals.length > 0 || isTraceCollapsed) && (
               <div
                 className="collapsible-trace-bar"
@@ -229,7 +249,7 @@ export const WhyDrawer: React.FC<WhyDrawerProps> = ({
                 <div className="trace-bar-title">
                   <CheckCircle2 size={16} className="text-emerald-400" />
                   <span>{completedCount} Data Sources Checked</span>
-                  <span className="trace-bar-badge">{totalDuration > 0 ? `${(totalDuration / 1000).toFixed(1)}s` : 'Real-time'}</span>
+                  <span className="trace-bar-badge">{totalWallMs > 0 ? `${(totalWallMs / 1000).toFixed(1)}s` : 'Real-time'}</span>
                 </div>
                 <div className="flex items-center gap-1 text-zinc-400" style={{ fontSize: '0.75rem' }}>
                   {isTraceCollapsed ? <ChevronDown size={16} /> : <ChevronUp size={16} />}
@@ -237,8 +257,7 @@ export const WhyDrawer: React.FC<WhyDrawerProps> = ({
               </div>
             )}
 
-            {/* Tool Execution Trace — always mounted so collapse/expand animates
-                via CSS (grid-template-rows) instead of an abrupt mount/unmount. */}
+            {/* Tool execution trace container */}
             <div className={`trace-collapse-wrapper ${isTraceCollapsed ? 'is-collapsed' : ''}`}>
               <div className="trace-collapse-inner">
                 <div className="tool-execution-container">
@@ -248,7 +267,11 @@ export const WhyDrawer: React.FC<WhyDrawerProps> = ({
                       const isDone = step.status === 'done';
                       const isInProgress = step.status === 'in_progress';
                       const isPending = step.status === 'pending';
-                      // Cascade: opening reveals top-to-bottom, closing folds bottom-to-top.
+                      const isAbsent = step.status === 'absent';
+                      const isWarning = step.status === 'warning';
+                      const isResolved = isDone || isAbsent || isWarning;
+                      const waiting = isWaitingOnWind(step);
+                      // Stagger step animation delays for cascading effect
                       const cascadeDelay = isTraceCollapsed
                         ? (toolSteps.length - 1 - idx) * 18
                         : idx * 18;
@@ -262,6 +285,10 @@ export const WhyDrawer: React.FC<WhyDrawerProps> = ({
                           <div className="step-icon-wrapper">
                             {isDone ? (
                               <CheckCircle2 size={16} className="text-emerald-400" />
+                            ) : isAbsent ? (
+                              <CheckCircle2 size={16} className="text-zinc-500" />
+                            ) : isWarning ? (
+                              <AlertCircle size={16} className="text-amber-400" />
                             ) : isInProgress ? (
                               <Loader2 size={16} className="animate-spin text-accent" />
                             ) : (
@@ -271,15 +298,23 @@ export const WhyDrawer: React.FC<WhyDrawerProps> = ({
 
                           <div className="flex flex-col" style={{ flex: 1 }}>
                             <span className="step-label">{step.label}</span>
+                            {waiting && (
+                              <span className="waiting-on-wind">
+                                waiting on wind
+                                <span className="waiting-dots" aria-hidden="true">
+                                  <span>.</span><span>.</span><span>.</span>
+                                </span>
+                              </span>
+                            )}
                           </div>
 
-                          {isDone && step.duration_ms !== undefined && (
+                          {isResolved && step.duration_ms !== undefined && (
                             <div className="flex items-center gap-1 text-zinc-400" style={{ fontSize: '0.7rem', fontWeight: 600 }}>
                               <span>{step.duration_ms < 1 ? '<1ms' : `${step.duration_ms}ms`}</span>
                             </div>
                           )}
 
-                          {!isDone && (
+                          {!isResolved && (
                             <StepIcon size={14} className={isInProgress ? 'text-accent' : 'text-zinc-600'} style={{ marginLeft: 'auto' }} />
                           )}
                         </div>
@@ -377,7 +412,7 @@ export const WhyDrawer: React.FC<WhyDrawerProps> = ({
                 <div className="signals-section">
                   <h4 className="section-subtitle">Signals</h4>
                   <div className="signals-grid">
-                    {signals.map((sig) => (
+                    {gridSignals.map((sig) => (
                       <div key={sig.id} className={`signal-chip status-${sig.status}`}>
                         <span className="signal-status-dot" />
                         <span className="signal-name">{sig.label}</span>
@@ -385,6 +420,11 @@ export const WhyDrawer: React.FC<WhyDrawerProps> = ({
                       </div>
                     ))}
                   </div>
+                  {unavailableCount > 0 && (
+                    <p className="signals-unavailable-note">
+                      {unavailableCount} data source{unavailableCount === 1 ? '' : 's'} unavailable
+                    </p>
+                  )}
                 </div>
               )}
             </div>
