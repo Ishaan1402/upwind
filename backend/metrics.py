@@ -131,7 +131,29 @@ def report(days: int = 30, db_path: str = DB_PATH) -> Dict[str, Any]:
         "WHERE judge_verdict_json IS NOT NULL AND datetime(created_at) >= datetime(?)",
         (cutoff,),
     ).fetchall()
+    narrative_rows = conn.execute(
+        "SELECT narrative FROM narrative_cache "
+        "WHERE datetime(created_at) >= datetime(?)",
+        (cutoff,),
+    ).fetchall()
     conn.close()
+
+    # Narrative verbosity: LLM briefings must stay tight (~110 words). Track
+    # the distribution so the dashboard can catch verbosity drift.
+    word_counts = sorted(
+        len((row["narrative"] or "").split()) for row in narrative_rows
+    )
+    narrative_count = len(word_counts)
+    narratives: Dict[str, Any] = {
+        "count": narrative_count,
+        "avg_words": round(sum(word_counts) / narrative_count, 1) if narrative_count else None,
+        "median_words": _percentile(word_counts, 0.50) if narrative_count else None,
+        "p90_words": _percentile(word_counts, 0.90) if narrative_count else None,
+        "pct_over_150_words": (
+            round(100 * sum(1 for w in word_counts if w > 150) / narrative_count, 1)
+            if narrative_count else None
+        ),
+    }
 
     request_count = len(request_rows)
     endpoint_status_counts: Dict[str, int] = Counter()
@@ -196,6 +218,7 @@ def report(days: int = 30, db_path: str = DB_PATH) -> Dict[str, Any]:
                 round(cached_judge_counts["pass"] / cached_judged, 4) if cached_judged else None
             ),
         },
+        "narratives": narratives,
     }
 
 

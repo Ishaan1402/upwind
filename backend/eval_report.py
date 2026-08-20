@@ -139,6 +139,7 @@ def _metrics_section(metrics: Optional[Dict[str, Any]]) -> str:
         return '<p class="empty">No metrics yet (first nightly run pending).</p>'
     requests = metrics.get("requests") or {}
     why = metrics.get("why") or {}
+    narratives = metrics.get("narratives") or {}
     latency = requests.get("latency") or {}
     rate = why.get("cache_hit_rate")
     cost = why.get("llm_cost_per_explanation_usd")
@@ -146,12 +147,20 @@ def _metrics_section(metrics: Optional[Dict[str, Any]]) -> str:
     rate_str = f"{rate * 100:.1f}%" if rate is not None else "n/a"
     cost_str = f"${cost:.4f}" if cost is not None else "n/a"
     judge_str = f"{judge_rate * 100:.1f}%" if judge_rate is not None else "n/a"
+    avg_words = narratives.get("avg_words")
+    over_150 = narratives.get("pct_over_150_words")
+    avg_words_str = f"{avg_words:.0f}" if avg_words is not None else "n/a"
+    over_150_str = f"{over_150:.0f}%" if over_150 is not None else "n/a"
     cards = (
         '<div class="cards">'
         f'<div class="card"><span class="num">{requests.get("total", 0)}</span>requests / {metrics.get("window_days", 30)}d</div>'
         f'<div class="card"><span class="num">{rate_str}</span>cache hit rate</div>'
         f'<div class="card"><span class="num">{cost_str}</span>LLM cost / explanation</div>'
         f'<div class="card"><span class="num">{judge_str}</span>judge pass rate</div>'
+        "</div>"
+        '<div class="cards">'
+        f'<div class="card"><span class="num">{avg_words_str}</span>avg narrative words</div>'
+        f'<div class="card"><span class="num">{over_150_str}</span>narratives &gt; 150 words</div>'
         "</div>"
     )
     latency_rows = [

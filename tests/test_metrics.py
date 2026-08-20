@@ -26,6 +26,35 @@ def test_record_and_report(tmp_path, monkeypatch):
     assert result["why"]["judge_pass_rate"] == 1.0
 
 
+def test_report_narrative_verbosity(tmp_path, monkeypatch):
+    db_path = tmp_path / "cache.db"
+    monkeypatch.setattr(db_module, "DB_PATH", str(db_path))
+    metrics_module.init_db()
+
+    db_module.set_cached_narrative("why_a", " ".join(["word"] * 80), {})   # 80 words
+    db_module.set_cached_narrative("why_b", " ".join(["word"] * 140), {})  # 140 words
+    db_module.set_cached_narrative("why_c", " ".join(["word"] * 200), {})  # 200 words (> 150)
+
+    n = metrics_module.report(days=30, db_path=str(db_path))["narratives"]
+    assert n["count"] == 3
+    assert n["avg_words"] == 140.0
+    assert n["median_words"] == 140.0
+    assert n["p90_words"] == 200.0
+    assert n["pct_over_150_words"] == round(100.0 / 3, 1)
+
+
+def test_report_narrative_verbosity_empty(tmp_path, monkeypatch):
+    db_path = tmp_path / "cache.db"
+    monkeypatch.setattr(db_module, "DB_PATH", str(db_path))
+    metrics_module.init_db()
+
+    n = metrics_module.report(days=30, db_path=str(db_path))["narratives"]
+    assert n["count"] == 0
+    assert n["avg_words"] is None
+    assert n["median_words"] is None
+    assert n["pct_over_150_words"] is None
+
+
 def test_estimate_llm_cost_uses_output_price(tmp_path, monkeypatch):
     monkeypatch.setattr(metrics_module, "LLM_OUTPUT_PRICE_PER_1M", 1.0)
     # 4000 chars ≈ 1000 tokens at $1/M tokens.

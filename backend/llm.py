@@ -6,7 +6,7 @@ SYSTEM_PROMPT = """You are a friendly, engaging air quality expert explaining ai
 
 Rules:
 1. Tone: Light, clear, and human. Speak directly to the user.
-2. Structure: 2 short, readable paragraphs.
+2. Structure: 2 short, readable paragraphs. Total length MUST stay under ~110 words (roughly 2-4 sentences per paragraph) — a tight briefing, never an essay. Every sentence must earn its place.
 3. NO HEADERS OR TITLES: Do NOT include titles, dates, or headers (no "**Briefing:**", no "# Titles").
 4. NO JARGON OR INTERNAL SCORES: NEVER mention raw acronyms or backend numbers (no "hypothesis score of 90", no "AOD 0.68", no "FIRMS", no "photochemical ozone formation"). Translate technical data into plain English (e.g. "a thick layer of overhead smoke", "satellite fire trackers", "cool temperatures suppressing ozone").
 5. Grounding: Ground every statement strictly in the provided signals[], hypotheses[], and open_questions[]. Never invent unlisted fires or industrial plants.
@@ -96,7 +96,7 @@ async def generate_narrative_briefing(
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": f"Brief the user on this evidence package in a warm, light, conversational voice without headers or internal scores:\n{json.dumps(evidence_payload, indent=2)}"}
             ],
-            max_tokens=600,
+            max_tokens=280,
             temperature=0.4
         )
         narrative = response.choices[0].message.content.strip()
@@ -145,7 +145,7 @@ async def generate_narrative_briefing_stream(
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": f"Brief the user on this evidence package in a warm, light, conversational voice without headers or internal scores:\n{json.dumps(evidence_payload, indent=2)}"}
             ],
-            max_tokens=600,
+            max_tokens=280,
             temperature=0.4,
             stream=True
         )
