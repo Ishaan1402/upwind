@@ -39,7 +39,7 @@ def _table(headers: List[str], rows: List[List[str]], empty_msg: str = "No data 
     return f'<table><thead><tr>{head}</tr></thead><tbody>{body}</tbody></table>'
 
 
-def _corpus_table(corpus: List[Dict[str, Any]]) -> str:
+def _corpus_table(corpus: List[Dict[str, Any]], public: bool = False) -> str:
     if not corpus:
         return '<p class="empty">No corpus results yet (first nightly run pending).</p>'
     rows = ""
@@ -48,6 +48,11 @@ def _corpus_table(corpus: List[Dict[str, Any]]) -> str:
         reasoning = (verdict.get("reasoning") or "").replace("\n", " ").strip()
         short = reasoning[:90] + ("..." if len(reasoning) > 90 else "")
         narrative = html.escape(item.get("narrative") or "")
+        narrative_cell = (
+            f"<details><summary>full</summary><pre>{narrative}</pre></details>"
+            if not public
+            else '<span class="muted">hidden on public page</span>'
+        )
         rows += (
             "<tr>"
             f"<td>{html.escape(str(item.get('scenario') or ''))}</td>"
@@ -55,7 +60,7 @@ def _corpus_table(corpus: List[Dict[str, Any]]) -> str:
             f"<td>{html.escape(str(verdict.get('judge_model') or ''))}</td>"
             f"<td>{html.escape(str(item.get('top_hypothesis') or ''))}</td>"
             f"<td>{html.escape(short)}</td>"
-            f"<td><details><summary>full</summary><pre>{narrative}</pre></details></td>"
+            f"<td>{narrative_cell}</td>"
             "</tr>"
         )
     return (
@@ -112,12 +117,13 @@ def _stats_section(stats: Optional[Dict[str, Any]]) -> str:
     )
 
 
-def _rule_hits_table(rule_hits: List[Dict[str, Any]]) -> str:
+def _rule_hits_table(rule_hits: List[Dict[str, Any]], public: bool = False) -> str:
     if not rule_hits:
         return '<p class="ok-line">No rule-judge violations in the cache.</p>'
+    cache_key_col = "key" if not public else "hidden"
     rows = [
         [
-            html.escape(str(hit.get("cache_key") or "")),
+            html.escape(str(hit.get("cache_key") or "")) if not public else "hidden",
             html.escape(str(hit.get("created_at") or "")),
             html.escape(", ".join(hit.get("jargon") or []) or "-"),
             "yes" if hit.get("has_disallowed_headers") else "no",
@@ -125,7 +131,74 @@ def _rule_hits_table(rule_hits: List[Dict[str, Any]]) -> str:
         ]
         for hit in rule_hits
     ]
-    return _table(["cache key", "created", "jargon", "headers", "missing tip"], rows)
+    return _table([cache_key_col, "created", "jargon", "headers", "missing tip"], rows)
+
+
+def _metrics_section(metrics: Optional[Dict[str, Any]]) -> str:
+    if not metrics:
+        return '<p class="empty">No metrics yet (first nightly run pending).</p>'
+    requests = metrics.get("requests") or {}
+    why = metrics.get("why") or {}
+    latency = requests.get("latency") or {}
+    rate = why.get("cache_hit_rate")
+    cost = why.get("llm_cost_per_explanation_usd")
+    judge_rate = why.get("judge_pass_rate") or why.get("cached_judge_pass_rate")
+    rate_str = f"{rate * 100:.1f}%" if rate is not None else "n/a"
+    cost_str = f"${cost:.4f}" if cost is not None else "n/a"
+    judge_str = f"{judge_rate * 100:.1f}%" if judge_rate is not None else "n/a"
+    cards = (
+        '<div class="cards">'
+        f'<div class="card"><span class="num">{requests.get("total", 0)}</span>requests / {metrics.get("window_days", 30)}d</div>'
+        f'<div class="card"><span class="num">{rate_str}</span>cache hit rate</div>'
+        f'<div class="card"><span class="num">{cost_str}</span>LLM cost / explanation</div>'
+        f'<div class="card"><span class="num">{judge_str}</span>judge pass rate</div>'
+        "</div>"
+    )
+    latency_rows = [
+        [
+            html.escape(str(endpoint)),
+            str(details.get("count")),
+            str(details.get("p50_ms")),
+            str(details.get("p95_ms")),
+            str(details.get("max_ms")),
+        ]
+        for endpoint, details in sorted(latency.items())
+    ]
+    return cards + "<h3>Latency by endpoint</h3>" + _table(
+        ["endpoint", "count", "p50 ms", "p95 ms", "max ms"],
+        latency_rows,
+        "No request latency data yet.",
+    )
+
+
+def _validation_section(validation: Optional[Dict[str, Any]]) -> str:
+    if not validation:
+        return '<p class="empty">No human/known-label validation results yet.</p>'
+    agreement = validation.get("exact_agreement")
+    kappa = validation.get("cohens_kappa")
+    agreement_str = f"{agreement * 100:.1f}%" if agreement is not None else "n/a"
+    kappa_str = str(kappa) if kappa is not None else "n/a"
+    cards = (
+        '<div class="cards">'
+        f'<div class="card"><span class="num">{validation.get("judged_cases", 0)}</span>judged cases</div>'
+        f'<div class="card"><span class="num">{agreement_str}</span>judge agreement</div>'
+        f'<div class="card"><span class="num">{kappa_str}</span>Cohen’s kappa</div>'
+        "</div>"
+    )
+    rows = []
+    for item in validation.get("results") or []:
+        rows.append([
+            html.escape(str(item.get("name") or "")),
+            _badge(item.get("gold_verdict")),
+            _badge(item.get("judge_verdict")),
+            "yes" if item.get("agreement") else "no",
+            html.escape(str(item.get("judge_model") or "")),
+        ])
+    return cards + _table(
+        ["case", "gold", "judge", "agree", "judge model"],
+        rows,
+        "No validation rows.",
+    )
 
 
 def render_dashboard(
@@ -133,6 +206,9 @@ def render_dashboard(
     compare: Optional[List[Dict[str, Any]]] = None,
     stats: Optional[Dict[str, Any]] = None,
     rule_hits: Optional[List[Dict[str, Any]]] = None,
+    metrics: Optional[Dict[str, Any]] = None,
+    validation: Optional[Dict[str, Any]] = None,
+    public: bool = False,
     generated_at: Optional[str] = None,
 ) -> str:
     """Build the full dashboard page as a single self-contained HTML string."""
@@ -144,7 +220,7 @@ def render_dashboard(
         f"{'scenario' if len(corpus) == 1 else 'scenarios'})"
     )
     data = json.dumps(
-        {"generated_at": generated_at, "repo": REPO, "workflows": WORKFLOWS},
+        {"generated_at": generated_at, "repo": REPO, "workflows": WORKFLOWS, "public": public},
         separators=(",", ":"),
     )
     workflow_cards = "".join(
@@ -160,13 +236,17 @@ def render_dashboard(
     ).replace(
         "__CORPUS_TITLE__", corpus_title
     ).replace(
-        "__CORPUS__", _corpus_table(corpus)
+        "__CORPUS__", _corpus_table(corpus, public=public)
     ).replace(
         "__COMPARE__", _compare_table(compare or [])
     ).replace(
         "__STATS__", _stats_section(stats)
     ).replace(
-        "__RULE_HITS__", _rule_hits_table(rule_hits or [])
+        "__RULE_HITS__", _rule_hits_table(rule_hits or [], public=public)
+    ).replace(
+        "__METRICS__", _metrics_section(metrics)
+    ).replace(
+        "__VALIDATION__", _validation_section(validation)
     )
 
 
@@ -224,6 +304,12 @@ footer { margin-top: 48px; color: #484f58; font-size: 12px; }
 
 <h2>CI status</h2>
 <div class="cards" id="wf-cards">__WORKFLOW_CARDS__</div>
+
+<h2>Metrics</h2>
+__METRICS__
+
+<h2>Judge validation</h2>
+__VALIDATION__
 
 <h2>__CORPUS_TITLE__</h2>
 __CORPUS__

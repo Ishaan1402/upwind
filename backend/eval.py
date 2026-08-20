@@ -252,6 +252,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     dashboard.add_argument("--compare", help="JSON file from `judge-compare --out`")
     dashboard.add_argument("--stats", help="JSON file from `stats --out`")
     dashboard.add_argument("--rule-hits", help="JSON file from `rule-judge --out`")
+    dashboard.add_argument("--metrics", help="JSON file from `python -m backend.metrics report --out`")
+    dashboard.add_argument("--validation", help="JSON file from `python -m backend.eval_validation --out`")
+    dashboard.add_argument("--public", action="store_true", help="hide narratives/cache keys for a public page")
     dashboard.add_argument("--out", required=True, help="output HTML path")
 
     args = parser.parse_args(argv)
@@ -300,6 +303,9 @@ def main(argv: Optional[List[str]] = None) -> int:
             compare=_load(args.compare),
             stats=_load(args.stats),
             rule_hits=_load(args.rule_hits),
+            metrics=_load(args.metrics),
+            validation=_load(args.validation),
+            public=args.public,
         )
         with open(args.out, "w") as f:
             f.write(page)

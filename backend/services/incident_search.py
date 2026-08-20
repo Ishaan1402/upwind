@@ -150,17 +150,22 @@ def parse_rss_items_for_incident(rss_text: str, max_days: int = 7) -> Optional[s
     return None
 
 
-async def search_fire_incident_name(state: Optional[str], city: Optional[str], lat: float, lon: float) -> Optional[str]:
+async def search_fire_incident_name(
+    state: Optional[str],
+    city: Optional[str],
+    lat: float,
+    lon: float,
+    country_code: Optional[str] = None,
+) -> Optional[str]:
     """
     Search Google News RSS for recent wildland fire incident mentions (7-day window).
     Queries bias toward wildfire/wildland language so urban 'fire' crime headlines are rare.
     Naming is decorative — scoring only treats news as a fire vote when FIRMS corroborates.
     """
-    location_str = (
-        f"{city} {state}".strip()
-        if (city or state)
-        else (f"{state}".strip() if state else f"{lat:.2f}, {lon:.2f}")
-    )
+    location_parts = [city, state]
+    if country_code and country_code.lower() != "us":
+        location_parts.append(country_code.upper())
+    location_str = " ".join(part for part in location_parts if part).strip() or f"{lat:.2f}, {lon:.2f}"
 
     wildland_terms = '(wildfire OR wildland OR "acres burned" OR evacuation)'
     queries = []

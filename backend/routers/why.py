@@ -22,12 +22,21 @@ from backend.engine.score import score_hypotheses
 from backend.llm import generate_narrative_briefing, generate_narrative_briefing_stream, generate_fallback_narrative
 from backend.llm_judge import judge_narrative
 from backend.db import get_cached_narrative, set_cached_narrative, update_cached_verdict
+from backend.config import (
+    DEEPSEEK_API_KEY,
+    ENFORCE_OBSERVATION_TOKENS,
+    OBSERVATION_TOKEN_SECRET,
+)
+from backend.metrics import estimate_llm_cost, record_why
+from backend.services.coverage import coverage_for_location
+from backend.observation_token import verify_observation_token
 
 router = APIRouter(prefix="/api", tags=["Why Attribution"])
 
 class WhyRequest(BaseModel):
     location: Dict[str, Any]
     observation: Dict[str, Any]
+    observation_token: Optional[str] = None
 
 async def _async_judge_streamed_narrative(evidence_payload: Dict[str, Any], full_narrative: str, cache_key: str):
     """Post-hoc non-blocking evaluation of streamed narrative."""
@@ -63,6 +72,17 @@ async def get_why_explanation(req: WhyRequest):
     location = req.location
     observation = req.observation
 
+    if ENFORCE_OBSERVATION_TOKENS and not verify_observation_token(
+        req.observation_token,
+        location,
+        observation,
+        OBSERVATION_TOKEN_SECRET,
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="observation_token is missing, expired, or does not match this observation.",
+        )
+
     loc_key = location.get("zip_code") or f"{location.get('lat', 0):.2f}_{location.get('lon', 0):.2f}"
     hour_stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H")
     cache_key = f"why_{loc_key}_{hour_stamp}"
@@ -78,6 +98,8 @@ async def get_why_explanation(req: WhyRequest):
 
     # DeepSeek Briefing Synthesis (Separate from tool trace)
     cached_narrative = get_cached_narrative(cache_key)
+    cache_hit = cached_narrative is not None
+    final_verdict = None
     if cached_narrative:
         narrative = cached_narrative
     else:
@@ -110,12 +132,23 @@ async def get_why_explanation(req: WhyRequest):
                 evidence_payload["narrative"] = narrative
 
         set_cached_narrative(cache_key, narrative, evidence_payload, verdict)
+        final_verdict = verdict.get("verdict") if verdict else None
 
     # Prepare map overlays if FIRMS hotspots present
     firms_sig = next((s for s in signals if s["id"] == "firms_upwind"), None)
     map_layers = {}
     if firms_sig and firms_sig.get("hotspots"):
         map_layers["firms_hotspots"] = firms_sig["hotspots"]
+
+    llm_generated = (not cache_hit) and bool(DEEPSEEK_API_KEY)
+    record_why(
+        "/api/why",
+        cache_hit=cache_hit,
+        llm_generated=llm_generated,
+        llm_cost_usd=estimate_llm_cost(narrative) if llm_generated else 0.0,
+        judge_verdict=final_verdict,
+        country_code=location.get("country_code"),
+    )
 
     return {
         "location": location,
@@ -125,7 +158,8 @@ async def get_why_explanation(req: WhyRequest):
         "open_questions": open_questions,
         "narrative": narrative,
         "execution_trace": execution_trace,
-        "map_layers": map_layers
+        "map_layers": map_layers,
+        "coverage": coverage_for_location(location, observation),
     }
 
 @router.get("/why/stream")
@@ -136,6 +170,8 @@ async def stream_why_explanation(
     city: Optional[str] = Query(None),
     state: Optional[str] = Query(None),
     name: Optional[str] = Query(None),
+    country_code: Optional[str] = Query(None, description="ISO country code, when known"),
+    observation_token: Optional[str] = Query(None, description="Signed token from /api/aqi"),
     aqi: Optional[int] = Query(None),
     primary_pollutant: Optional[str] = Query("PM2.5"),
     category: Optional[str] = Query("Moderate")
@@ -153,8 +189,28 @@ async def stream_why_explanation(
         "zip_code": zip_code,
         "city": city,
         "state": state,
-        "name": name or f"{city or 'Location'}, {state or ''}".strip(", ") or f"{lat:.2f}, {lon:.2f}"
+        "name": name or f"{city or 'Location'}, {state or ''}".strip(", ") or f"{lat:.2f}, {lon:.2f}",
+        "country_code": country_code,
     }
+
+    if ENFORCE_OBSERVATION_TOKENS and aqi is not None:
+        client_observation = {
+            "source": "AirNow",
+            "aqi": aqi,
+            "primary_pollutant": primary_pollutant or "PM2.5",
+            "category": category or "Moderate",
+            "pollutants": {},
+        }
+        if not verify_observation_token(
+            observation_token,
+            location,
+            client_observation,
+            OBSERVATION_TOKEN_SECRET,
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail="observation_token is missing, expired, or does not match this observation.",
+            )
 
     # Fetch observation if not provided
     if aqi is None:
@@ -182,6 +238,8 @@ async def stream_why_explanation(
         loc_key = zip_code or f"{lat:.2f}_{lon:.2f}"
         hour_stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H")
         cache_key = f"why_{loc_key}_{hour_stamp}"
+        cache_hit = False
+        llm_generated = False
 
         # 1. Weather Vector Tool
         yield f"event: tool_start\ndata: {json.dumps({'step': 'weather_vector', 'label': TOOL_STEPS['weather_vector']})}\n\n"
@@ -223,7 +281,7 @@ async def stream_why_explanation(
 
         incident_name = None
         if is_pm_elevated or firms_res["status"] == "present" or aod_res["status"] == "present":
-            incident_name = await search_fire_incident_name(state, city, lat, lon)
+            incident_name = await search_fire_incident_name(state, city, lat, lon, country_code)
         t1 = time.perf_counter()
 
         web_trace = create_trace_step("web_search", (t1 - t0) * 1000, "done" if incident_name else "absent")
@@ -233,7 +291,12 @@ async def stream_why_explanation(
         # 5. OpenAQ Reference Monitor Concentrations Tool
         yield f"event: tool_start\ndata: {json.dumps({'step': 'openaq_monitors', 'label': TOOL_STEPS['openaq_monitors']})}\n\n"
         t0 = time.perf_counter()
-        openaq_sig = await collect_openaq_signal(lat, lon, include_baselines=aqi_val > 50)
+        openaq_sig = await collect_openaq_signal(
+            lat,
+            lon,
+            include_baselines=aqi_val > 50,
+            country_code=country_code or "US",
+        )
         t1 = time.perf_counter()
         openaq_trace = create_trace_step(
             "openaq_monitors",
@@ -267,7 +330,8 @@ async def stream_why_explanation(
             "hypotheses": hypotheses,
             "open_questions": open_questions,
             "map_layers": map_layers,
-            "execution_trace": execution_trace
+            "execution_trace": execution_trace,
+            "coverage": coverage_for_location(location, observation),
         }
         yield f"event: signals_ready\ndata: {json.dumps(signals_payload)}\n\n"
 
@@ -276,12 +340,14 @@ async def stream_why_explanation(
         full_narrative = ""
 
         if cached_narrative:
+            cache_hit = True
             full_narrative = cached_narrative
             words = cached_narrative.split(" ")
             for w in words:
                 yield f"event: llm_token\ndata: {json.dumps({'token': w + ' '})}\n\n"
                 await asyncio.sleep(0.015)
         else:
+            llm_generated = bool(DEEPSEEK_API_KEY)
             async for token in generate_narrative_briefing_stream(location, observation, signals, hypotheses, open_questions):
                 full_narrative += token
                 yield f"event: llm_token\ndata: {json.dumps({'token': token})}\n\n"
@@ -298,6 +364,14 @@ async def stream_why_explanation(
             # Post-hoc non-blocking judge check
             asyncio.create_task(_async_judge_streamed_narrative(evidence_payload, full_narrative, cache_key))
 
-        yield f"event: complete\ndata: {json.dumps({'narrative': full_narrative, 'execution_trace': execution_trace})}\n\n"
+        record_why(
+            "/api/why/stream",
+            cache_hit=cache_hit,
+            llm_generated=llm_generated,
+            llm_cost_usd=estimate_llm_cost(full_narrative) if llm_generated else 0.0,
+            judge_verdict=None,
+            country_code=location.get("country_code"),
+        )
+        yield f"event: complete\ndata: {json.dumps({'narrative': full_narrative, 'execution_trace': execution_trace, 'coverage': coverage_for_location(location, observation)})}\n\n"
 
     return StreamingResponse(sse_event_generator(), media_type="text/event-stream")

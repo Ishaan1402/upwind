@@ -161,16 +161,22 @@ def monitor_source_label(monitor: Dict[str, Any]) -> str:
     return "air quality monitor"
 
 
-async def _fetch_location_results(lat: float, lon: float, radius_m: int) -> Optional[List[Dict[str, Any]]]:
+async def _fetch_location_results(
+    lat: float,
+    lon: float,
+    radius_m: int,
+    country_code: Optional[str] = "US",
+) -> Optional[List[Dict[str, Any]]]:
     """Raw reference-monitor location search; None on failure, [] on no matches."""
     params = {
         "coordinates": f"{lat},{lon}",
         "radius": str(radius_m),
         "monitor": "true",
         "mobile": "false",
-        "iso": "US",
         "limit": "1000",
     }
+    if country_code:
+        params["iso"] = country_code.upper()
     try:
         async with _client() as client:
             resp = await client.get(f"{OPENAQ_BASE_URL}/v3/locations", params=params)
@@ -183,7 +189,11 @@ async def _fetch_location_results(lat: float, lon: float, radius_m: int) -> Opti
 
 
 async def discover_reference_monitors(
-    lat: float, lon: float, limit: int = 3, radius_m: Optional[int] = None
+    lat: float,
+    lon: float,
+    limit: int = 3,
+    radius_m: Optional[int] = None,
+    country_code: Optional[str] = "US",
 ) -> List[Dict[str, Any]]:
     """
     Find the nearest US reference-grade monitors within radius_m (default: 10 km,
@@ -195,11 +205,13 @@ async def discover_reference_monitors(
     if not OPENAQ_API_KEY:
         return []
 
-    results = await _fetch_location_results(lat, lon, radius_m or OPENAQ_PREFERRED_RADIUS_M)
+    results = await _fetch_location_results(
+        lat, lon, radius_m or OPENAQ_PREFERRED_RADIUS_M, country_code
+    )
     if results is None:
         return []
     if not results and radius_m is None:
-        results = await _fetch_location_results(lat, lon, OPENAQ_RADIUS_M)
+        results = await _fetch_location_results(lat, lon, OPENAQ_RADIUS_M, country_code)
         if results is None:
             return []
 

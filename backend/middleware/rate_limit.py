@@ -6,6 +6,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 from backend.config import RATE_LIMIT_AQI_PER_MIN, RATE_LIMIT_WHY_PER_HOUR, TRUST_PROXY
+from backend.metrics import record_request
 
 logger = logging.getLogger("upwind.http")
 if not logger.handlers:
@@ -76,8 +77,10 @@ class RateLimitAndLoggingMiddleware(BaseHTTPMiddleware):
             response = await call_next(request)
             duration_ms = round((time.perf_counter() - t0) * 1000, 2)
             logger.info(f"{method} {path} {response.status_code} {duration_ms}ms {ip}")
+            record_request(method, path, response.status_code, duration_ms)
             return response
         except Exception as e:
             duration_ms = round((time.perf_counter() - t0) * 1000, 2)
             logger.error(f"{method} {path} 500 {duration_ms}ms {ip} - Error: {e}")
+            record_request(method, path, 500, duration_ms)
             raise e

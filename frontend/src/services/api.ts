@@ -43,11 +43,11 @@ export async function fetchAqiByCoords(lat: number, lon: number): Promise<AqiRes
   return res.json();
 }
 
-export async function fetchWhyExplanation(location: any, observation: any): Promise<WhyResponse> {
+export async function fetchWhyExplanation(location: any, observation: any, observationToken?: string | null): Promise<WhyResponse> {
   const res = await fetchWithTimeout(`${API_BASE}/why`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ location, observation })
+    body: JSON.stringify({ location, observation, observation_token: observationToken || null })
   }, 25000);
 
   if (!res.ok) {
@@ -67,7 +67,7 @@ export interface StreamCallbacks {
   onError?: (err: any) => void;
 }
 
-export function streamWhyExplanation(location: any, observation: any, callbacks: StreamCallbacks): () => void {
+export function streamWhyExplanation(location: any, observation: any, callbacks: StreamCallbacks, observationToken?: string | null): () => void {
   const params = new URLSearchParams({
     lat: String(location.lat),
     lon: String(location.lon),
@@ -75,6 +75,8 @@ export function streamWhyExplanation(location: any, observation: any, callbacks:
     city: location.city || '',
     state: location.state || '',
     name: location.name || '',
+    country_code: location.country_code || '',
+    observation_token: observationToken || '',
     aqi: String(observation.aqi || 50),
     primary_pollutant: observation.primary_pollutant || 'PM2.5',
     category: observation.category || 'Moderate'

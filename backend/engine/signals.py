@@ -44,19 +44,23 @@ def _openaq_unavailable_signal(detail: str) -> Dict[str, Any]:
 
 
 async def collect_openaq_signal(
-    lat: float, lon: float, include_baselines: bool = True
+    lat: float,
+    lon: float,
+    include_baselines: bool = True,
+    country_code: Optional[str] = "US",
 ) -> Dict[str, Any]:
     """
     Gather OpenAQ reference-monitor concentrations for attribution.
 
-    Only fresh (<=3h), US reference-monitor readings are included; anything
-    else results in an "unavailable" signal so scoring behaves as before.
+    Only fresh (<=3h) reference-monitor readings for the target country are
+    included; anything else results in an "unavailable" signal so scoring
+    behaves as before. A country_code of None searches without a country filter.
     Baseline percentiles are skipped when include_baselines is False (Good-AQI
     briefings never use them, so the extra calls are wasted latency).
     Never raises.
     """
     try:
-        candidates = await discover_reference_monitors(lat, lon, limit=3)
+        candidates = await discover_reference_monitors(lat, lon, limit=3, country_code=country_code)
         if not candidates:
             return _openaq_unavailable_signal(
                 "No air quality monitor within 25 km (or OpenAQ key not configured)"
@@ -75,7 +79,9 @@ async def collect_openaq_signal(
         # A dead feed on the nearest monitor must not block a live one further
         # out: widen to the max radius when nothing nearby has fresh readings.
         if not latest_by_id:
-            wider = await discover_reference_monitors(lat, lon, limit=10, radius_m=OPENAQ_RADIUS_M)
+            wider = await discover_reference_monitors(
+                lat, lon, limit=10, radius_m=OPENAQ_RADIUS_M, country_code=country_code
+            )
             if wider:
                 new_ids = [c["location_id"] for c in candidates]
                 wider_results = await asyncio.gather(
@@ -227,7 +233,10 @@ async def assemble_evidence_signals(
     # Step 5: OpenAQ Reference Monitor Concentrations
     t0 = time.perf_counter()
     openaq_sig = await collect_openaq_signal(
-        lat, lon, include_baselines=observation.get("aqi", 0) > 50
+        lat,
+        lon,
+        include_baselines=observation.get("aqi", 0) > 50,
+        country_code=location.get("country_code") or "US",
     )
     t1 = time.perf_counter()
     execution_trace.append(create_trace_step(

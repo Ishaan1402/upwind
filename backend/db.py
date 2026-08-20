@@ -6,8 +6,8 @@ from typing import Optional, Dict, Any
 
 DB_PATH = os.path.join(os.path.dirname(__file__), "cache.db")
 
-def init_db():
-    conn = sqlite3.connect(DB_PATH)
+def init_db(db_path: Optional[str] = None):
+    conn = sqlite3.connect(db_path or DB_PATH)
     cursor = conn.cursor()
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS narrative_cache (
@@ -24,6 +24,34 @@ def init_db():
             payload_json TEXT NOT NULL,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS request_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts TEXT NOT NULL,
+            endpoint TEXT NOT NULL,
+            method TEXT NOT NULL,
+            status INTEGER NOT NULL,
+            duration_ms REAL NOT NULL
+        )
+    """)
+    cursor.execute("""
+        CREATE INDEX IF NOT EXISTS idx_request_events_ts ON request_events(ts)
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS why_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts TEXT NOT NULL,
+            endpoint TEXT NOT NULL,
+            cache_hit INTEGER NOT NULL DEFAULT 0,
+            llm_generated INTEGER NOT NULL DEFAULT 0,
+            llm_cost_usd REAL NOT NULL DEFAULT 0,
+            judge_verdict TEXT,
+            country_code TEXT
+        )
+    """)
+    cursor.execute("""
+        CREATE INDEX IF NOT EXISTS idx_why_events_ts ON why_events(ts)
     """)
     conn.commit()
     

@@ -26,6 +26,7 @@ fi
 
 echo "==> 1/4 eval directory ($EVAL_DIR)"
 mkdir -p "$EVAL_DIR"
+mkdir -p "$EVAL_DIR/evidence"
 chmod 755 "$EVAL_DIR"
 
 # nginx (www-data) must be able to traverse the home dir to reach the web
@@ -57,6 +58,10 @@ if [ ! -f "$EVAL_DIR/index.html" ]; then
   printf '<!doctype html><title>Upwind eval</title><p>Dashboard not rendered yet; the first nightly run will populate this page.</p>\n' > "$EVAL_DIR/index.html"
   chmod 644 "$EVAL_DIR/index.html"
 fi
+if [ ! -f "$EVAL_DIR/evidence/index.html" ]; then
+  printf '<!doctype html><title>Upwind evidence</title><p>Evidence scorecard not rendered yet; the first nightly run will populate this page.</p>\n' > "$EVAL_DIR/evidence/index.html"
+  chmod 644 "$EVAL_DIR/evidence/index.html"
+fi
 
 echo "==> 2/4 nginx location /eval"
 SERVER_FILES="$(grep -RlE 'server_name[^;]*getupwind\.me' /etc/nginx/sites-enabled /etc/nginx/conf.d 2>/dev/null || true)"
@@ -77,12 +82,19 @@ import os
 import sys
 
 htpasswd, evaldir, files = sys.argv[1], sys.argv[2], sys.argv[3]
-snippet = (
+snippet_eval = (
     "\n    # Upwind eval dashboard (managed by setup_eval_dashboard.sh)\n"
     '    location /eval {\n'
     '        auth_basic "Upwind eval";\n'
     f"        auth_basic_user_file {htpasswd};\n"
     f"        alias {evaldir}/;\n"
+    "        index index.html;\n"
+    "    }\n"
+)
+snippet_evidence = (
+    "\n    # Upwind public evidence scorecard (managed by setup_eval_dashboard.sh)\n"
+    '    location /evidence {\n'
+    f"        alias {evaldir}/evidence/;\n"
     "        index index.html;\n"
     "    }\n"
 )
@@ -131,16 +143,21 @@ for path in [p.strip() for p in files.splitlines() if p.strip()]:
     if best is None:
         continue
     start, end, block = best
-    if "location /eval" in block:
-        print(f"    {path}: location /eval already present, skipping")
+    if "location /eval" in block and "location /evidence" in block:
+        print(f"    {path}: /eval and /evidence already present, skipping")
         sys.exit(0)
+    snippet = ""
+    if "location /eval" not in block:
+        snippet += snippet_eval
+    if "location /evidence" not in block:
+        snippet += snippet_evidence
     backup = path + ".bak-eval"
     if not os.path.exists(backup):
         open(backup, "w").write(src)
     insert_at = src.rfind("}", start, end + 1)
     new_src = src[:insert_at] + snippet + src[insert_at:]
     open(path, "w").write(new_src)
-    print(f"    {path}: added location /eval (backup at {backup})")
+    print(f"    {path}: added missing eval locations (backup at {backup})")
     sys.exit(0)
 
 print("ERROR: no matching server block found in any candidate file", file=sys.stderr)
@@ -173,9 +190,14 @@ CODE="$(curl -s -o /dev/null -w '%{http_code}' -k -u "$(cat "$AUTH_FILE")" -H 'H
 if [ "$CODE" != "200" ]; then
   CODE="$(curl -s -o /dev/null -w '%{http_code}' -k -u "$(cat "$AUTH_FILE")" -H 'Host: getupwind.me' https://127.0.0.1/eval/ 2>/dev/null || true)"
 fi
+PUBLIC_CODE="$(curl -s -o /dev/null -w '%{http_code}' -k -H 'Host: getupwind.me' http://127.0.0.1/evidence/ 2>/dev/null || true)"
+if [ "$PUBLIC_CODE" != "200" ]; then
+  PUBLIC_CODE="$(curl -s -o /dev/null -w '%{http_code}' -k -H 'Host: getupwind.me' https://127.0.0.1/evidence/ 2>/dev/null || true)"
+fi
 echo "    GET /eval/ -> HTTP $CODE"
-if [ "$CODE" != "200" ]; then
-  echo "WARNING: health check failed; check the nginx config and reload." >&2
+echo "    GET /evidence/ -> HTTP $PUBLIC_CODE"
+if [ "$CODE" != "200" ] || [ "$PUBLIC_CODE" != "200" ]; then
+  echo "WARNING: one or more health checks failed; check the nginx config and reload." >&2
   exit 1
 fi
-echo "Done. Dashboard will be published here nightly: https://getupwind.me/eval/"
+echo "Done. Dashboard will be published here nightly: https://getupwind.me/eval/ and https://getupwind.me/evidence/"

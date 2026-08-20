@@ -24,13 +24,16 @@ def geocode_location(query: str) -> Optional[Dict[str, Any]]:
     if latlon_match:
         lat = float(latlon_match.group(1))
         lon = float(latlon_match.group(2))
+        reverse = _reverse_geocode(lat, lon)
         return {
             "lat": lat,
             "lon": lon,
             "name": f"{lat:.4f}, {lon:.4f}",
             "zip_code": None,
-            "state": None,
-            "city": None
+            "state": reverse.get("state"),
+            "city": reverse.get("city"),
+            "country_code": reverse.get("country_code"),
+            "country": reverse.get("country"),
         }
 
     # Check 5-digit US ZIP code
@@ -47,7 +50,9 @@ def geocode_location(query: str) -> Optional[Dict[str, Any]]:
                 "name": name,
                 "zip_code": query,
                 "state": state,
-                "city": city
+                "city": city,
+                "country_code": "US",
+                "country": "United States"
             }
 
     # General Nominatim lookup with 7-day SQLite caching
@@ -59,13 +64,16 @@ def geocode_location(query: str) -> Optional[Dict[str, Any]]:
     try:
         location = _nom_geocodes.geocode(query, timeout=5)
         if location:
+            address = (location.raw or {}).get("address") or {}
             result = {
                 "lat": float(location.latitude),
                 "lon": float(location.longitude),
                 "name": location.address,
                 "zip_code": query if zip_match else None,
                 "state": None,
-                "city": None
+                "city": None,
+                "country_code": address.get("country_code"),
+                "country": address.get("country"),
             }
             set_cached_geocode(query_norm, result)
             return result
@@ -74,6 +82,35 @@ def geocode_location(query: str) -> Optional[Dict[str, Any]]:
         pass
 
     return None
+
+
+def _reverse_geocode(lat: float, lon: float) -> Dict[str, Any]:
+    """Best-effort reverse geocode for direct lat/lon lookups (cached 7 days)."""
+    query_key = f"reverse_{lat:.4f}_{lon:.4f}"
+    cached = get_cached_geocode(query_key)
+    if cached:
+        return cached
+    result = {
+        "state": None,
+        "city": None,
+        "country_code": None,
+        "country": None,
+    }
+    try:
+        location = _nom_geocodes.reverse((lat, lon), timeout=5)
+        if location:
+            address = (location.raw or {}).get("address") or {}
+            result.update({
+                "state": address.get("state"),
+                "city": address.get("city") or address.get("town") or address.get("village"),
+                "country_code": address.get("country_code"),
+                "country": address.get("country"),
+            })
+            set_cached_geocode(query_key, result)
+    except Exception as e:
+        print(f"[Nominatim Reverse Geocode Error]: {e}")
+        pass
+    return result
 
 def math_isnan(val) -> bool:
     try:

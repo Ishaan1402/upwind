@@ -75,6 +75,21 @@ def test_render_dashboard_escapes_user_content():
     assert "&lt;script&gt;alert(1)&lt;/script&gt; &amp; more" in page
 
 
+def test_render_dashboard_public_hides_narratives_and_cache_keys():
+    page = render_dashboard(
+        corpus=SAMPLE_CORPUS,
+        rule_hits=[{"cache_key": "secret-key", "created_at": "2026-08-04", "jargon": ["AOD"], "has_disallowed_headers": False, "has_tip_heuristic": False}],
+        metrics={"requests": {"total": 10, "latency": {}}, "why": {}},
+        validation={"exact_agreement": 0.9, "cohens_kappa": 0.8, "judged_cases": 20, "results": []},
+        public=True,
+    )
+    assert "Smoke is drifting in from the northwest." not in page
+    assert "secret-key" not in page
+    assert "hidden on public page" in page
+    assert "Judge validation" in page
+    assert "Metrics" in page
+
+
 def test_render_dashboard_empty_inputs_still_build():
     page = render_dashboard()
     assert "No corpus results yet" in page

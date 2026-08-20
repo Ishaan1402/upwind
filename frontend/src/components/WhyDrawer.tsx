@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import type { LocationInfo, ObservationInfo, SignalItem, HypothesisItem } from '../types/aqi';
+import type { CoverageInfo, LocationInfo, ObservationInfo, SignalItem, HypothesisItem } from '../types/aqi';
 import { streamWhyExplanation } from '../services/api';
 import { X, AlertCircle, Sparkles, CheckCircle2, XCircle, Loader2, Radio, Flame, Wind, Cpu, Search, Gauge, ChevronDown, ChevronUp, Circle } from 'lucide-react';
 
@@ -9,7 +9,9 @@ interface WhyDrawerProps {
   onClose: () => void;
   location: LocationInfo | null;
   observation: ObservationInfo | null;
-  onSignalsReady?: (data: { signals: SignalItem[]; hypotheses: HypothesisItem[]; open_questions: string[]; map_layers?: any; execution_trace?: any[] }) => void;
+  coverage?: CoverageInfo | null;
+  observationToken?: string | null;
+  onSignalsReady?: (data: { signals: SignalItem[]; hypotheses: HypothesisItem[]; open_questions: string[]; map_layers?: any; execution_trace?: any[]; coverage?: CoverageInfo }) => void;
 }
 
 interface InternalToolStep {
@@ -35,6 +37,8 @@ export const WhyDrawer: React.FC<WhyDrawerProps> = ({
   onClose,
   location,
   observation,
+  coverage,
+  observationToken,
   onSignalsReady: onSignalsReadyProp
 }) => {
   const [toolSteps, setToolSteps] = useState<InternalToolStep[]>(DEFAULT_STEPS);
@@ -161,12 +165,12 @@ export const WhyDrawer: React.FC<WhyDrawerProps> = ({
         setIsStreamingLLM(false);
         setError(err.message || 'Error streaming live evidence explanation.');
       }
-    });
+    }, observationToken);
 
     return () => {
       closeStream();
     };
-  }, [isOpen, location, observation]);
+  }, [isOpen, location, observation, observationToken]);
 
   if (!isOpen) return null;
 
@@ -308,6 +312,11 @@ export const WhyDrawer: React.FC<WhyDrawerProps> = ({
               {/* Streaming Narrative Briefing Box */}
               <div className="narrative-box">
                 <h4 className="section-subtitle">Briefing</h4>
+                {coverage && coverage.mode !== 'us' && (
+                  <p className="coverage-note" style={{ fontSize: '0.75rem', color: '#94a3b8', marginBottom: '8px' }}>
+                    {coverage.mode === 'international' ? 'International data' : 'Best-effort data'} • {coverage.disclaimer}
+                  </p>
+                )}
                 <p className="narrative-text">
                   {streamedNarrative}
                   {isStreamingLLM && <span className="streaming-cursor">▋</span>}

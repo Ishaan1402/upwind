@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import type { LocationInfo, ObservationInfo, WhyResponse } from './types/aqi';
+import type { CoverageInfo, LocationInfo, ObservationInfo, WhyResponse } from './types/aqi';
 import { Wind } from 'lucide-react';
 import { SearchBar } from './components/SearchBar';
 import { MapView } from './components/MapView';
@@ -10,6 +10,8 @@ import { fetchAqiData, fetchAqiByCoords } from './services/api';
 export const App: React.FC = () => {
   const [location, setLocation] = useState<LocationInfo | null>(null);
   const [observation, setObservation] = useState<ObservationInfo | null>(null);
+  const [coverage, setCoverage] = useState<CoverageInfo | null>(null);
+  const [observationToken, setObservationToken] = useState<string | null>(null);
   const [whyData, setWhyData] = useState<WhyResponse | null>(null);
   const [loadingAqi, setLoadingAqi] = useState<boolean>(false);
   const [errorAqi, setErrorAqi] = useState<string | null>(null);
@@ -41,6 +43,8 @@ export const App: React.FC = () => {
       const res = await fetchAqiData(query);
       setLocation(res.location);
       setObservation(res.observation);
+      setCoverage(res.coverage ?? null);
+      setObservationToken(res.observation_token ?? null);
       setWhyData(null);
     } catch (err: any) {
       setErrorAqi(err.message || 'Upwind currently covers US states & territories only.');
@@ -56,6 +60,8 @@ export const App: React.FC = () => {
       const res = await fetchAqiByCoords(lat, lon);
       setLocation(res.location);
       setObservation(res.observation);
+      setCoverage(res.coverage ?? null);
+      setObservationToken(res.observation_token ?? null);
       setWhyData(null);
     } catch (err: any) {
       setErrorAqi(err.message || 'Upwind currently covers US states & territories only.');
@@ -111,6 +117,7 @@ export const App: React.FC = () => {
             <AqiCard
               location={location}
               observation={observation}
+              coverage={coverage}
               onShowWhy={handleShowWhy}
               loadingWhy={false}
             />
@@ -124,6 +131,8 @@ export const App: React.FC = () => {
         onClose={() => setDrawerOpen(false)}
         location={location}
         observation={observation}
+        coverage={coverage}
+        observationToken={observationToken}
         onSignalsReady={(data) => {
           if (location && observation) {
             setWhyData({
@@ -134,7 +143,8 @@ export const App: React.FC = () => {
               open_questions: data.open_questions || [],
               narrative: '',
               map_layers: data.map_layers,
-              execution_trace: data.execution_trace
+              execution_trace: data.execution_trace,
+              coverage: data.coverage
             });
           }
         }}

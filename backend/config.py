@@ -27,6 +27,18 @@ RATE_LIMIT_AQI_PER_MIN = int(os.getenv("RATE_LIMIT_AQI_PER_MIN", "60"))
 RATE_LIMIT_WHY_PER_HOUR = int(os.getenv("RATE_LIMIT_WHY_PER_HOUR", "8"))
 TRUST_PROXY = os.getenv("TRUST_PROXY", "0").strip() in ("1", "true", "True")
 
+# Cost estimation for the metrics dashboard. Update these when provider
+# pricing changes; the dashboard labels the result as an estimate.
+LLM_INPUT_PRICE_PER_1M = float(os.getenv("LLM_INPUT_PRICE_PER_1M", "0.27"))
+LLM_OUTPUT_PRICE_PER_1M = float(os.getenv("LLM_OUTPUT_PRICE_PER_1M", "1.10"))
+
+# Observation tokens bind /api/aqi responses to /api/why requests so clients
+# cannot fabricate observations. Set a strong secret and enable enforcement in
+# production.
+OBSERVATION_TOKEN_SECRET = os.getenv("OBSERVATION_TOKEN_SECRET", "")
+OBSERVATION_TOKEN_MAX_AGE_SECONDS = int(os.getenv("OBSERVATION_TOKEN_MAX_AGE_SECONDS", "600"))
+ENFORCE_OBSERVATION_TOKENS = os.getenv("ENFORCE_OBSERVATION_TOKENS", "0").strip() in ("1", "true", "True")
+
 # AQI standard category colors & labels according to EPA
 AQI_CATEGORIES = [
     {"max": 50, "label": "Good", "color": "#00e400", "textColor": "#000000", "description": "Air quality is satisfactory, and air pollution poses little or no risk."},
