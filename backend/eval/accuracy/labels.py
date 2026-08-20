@@ -12,8 +12,8 @@ Classification precedence (deterministic, evaluated top to bottom):
 
   0. no determinable AQI (``observation.aqi is None``) -> ``ambiguous`` — a
      missing AQI is unknown, never "clean".
-  1. ``aqi <= AQI_ELEVATED (50)`` -> ``clean`` — a non-elevated day is always
-     clean, whatever the other signals say.
+  1. ``aqi <= LABEL_PARAMS.aqi_elevated (50)`` -> ``clean`` — a non-elevated
+     day is always clean, whatever the other signals say.
   2. PM2.5 primary:
        a. ``smoke_density in {"medium", "heavy"}`` -> ``wildfire_smoke``.
           A verified analyst plume TRUMPS inversion, so it wins even when the
@@ -21,8 +21,8 @@ Classification precedence (deterministic, evaluated top to bottom):
        b. ``upwind_fire is True`` -> ``wildfire_smoke``. This subsumes the
           explicit "light smoke + upwind fire" rule: a verified upwind fire
           makes even light analyst-observed smoke attributable to the fire.
-       c. cold (``tmin_f < COLD_TEMP_F``) AND calm (``wind_max_mph <
-          CALM_WIND_SPEED_MPH``):
+       c. cold (``tmin_f < LABEL_PARAMS.cold_temp_f``) AND calm
+          (``wind_max_mph < LABEL_PARAMS.calm_wind_speed_mph``):
             - light smoke WITHOUT an upwind fire -> ``ambiguous`` — light haze
               with no fire under cold/calm could be settling smoke or an
               inversion, so the light-haze exception takes precedence over
@@ -31,7 +31,7 @@ Classification precedence (deterministic, evaluated top to bottom):
        d. ``rural is True`` AND no upwind fire AND no smoke -> ``ambiguous`` —
           rural PM with no attributable source.
        e. otherwise -> ``urban_industrial_pm``.
-  3. PM10 primary: ``wind_max_mph >= DUST_WIND_SPEED_MPH (8.0)`` ->
+  3. PM10 primary: ``wind_max_mph >= LABEL_PARAMS.dust_wind_speed_mph (8.0)`` ->
      ``windblown_dust``; else ``ambiguous`` (PM10 without wind is not clean
      dust).
   4. O3 primary -> ``ozone_episode``.
@@ -41,12 +41,7 @@ Classification precedence (deterministic, evaluated top to bottom):
 
 from typing import Dict, Iterable, List, Optional, Tuple
 
-from backend.engine.params import (
-    AQI_ELEVATED,
-    CALM_WIND_SPEED_MPH,
-    COLD_TEMP_F,
-    DUST_WIND_SPEED_MPH,
-)
+from backend.engine.params import LABEL_PARAMS
 from backend.eval.accuracy.records import (
     AqsDailyRecord,
     LabelRecord,
@@ -56,9 +51,11 @@ from backend.eval.accuracy.records import (
 
 # Schema map: EPA AQS parameter code -> canonical pollutant name. This is a
 # schema map (not a tunable threshold), so it lives here rather than in
-# engine/params.
+# engine/params. ``88502`` is the non-FRM PM2.5 mass code IMPROVE speciation
+# sites report their PM2.5 under, so it maps to PM2.5 like the FRM/FEM 88101.
 PARAMETER_TO_POLLUTANT: Dict[str, str] = {
     "88101": "PM2.5",
+    "88502": "PM2.5",
     "81102": "PM10",
     "44201": "O3",
     "42602": "NO2",
@@ -176,12 +173,12 @@ def classify_sample(
     cold = (
         weather is not None
         and weather.tmin_f is not None
-        and weather.tmin_f < COLD_TEMP_F
+        and weather.tmin_f < LABEL_PARAMS.cold_temp_f
     )
     calm = (
         weather is not None
         and weather.wind_max_mph is not None
-        and weather.wind_max_mph < CALM_WIND_SPEED_MPH
+        and weather.wind_max_mph < LABEL_PARAMS.calm_wind_speed_mph
     )
     aqi = observation.aqi
     primary = observation.primary_pollutant
@@ -202,10 +199,10 @@ def classify_sample(
         return _label("ambiguous", "no determinable AQI")
 
     # 1. Non-elevated AQI is always clean, regardless of other signals.
-    if aqi <= AQI_ELEVATED:
+    if aqi <= LABEL_PARAMS.aqi_elevated:
         return _label(
             "clean",
-            f"AQI {_aqi_display(aqi)} at/below elevated threshold {AQI_ELEVATED}",
+            f"AQI {_aqi_display(aqi)} at/below elevated threshold {LABEL_PARAMS.aqi_elevated}",
         )
 
     if primary == "PM2.5":
@@ -236,8 +233,8 @@ def classify_sample(
                 )
             return _label(
                 "winter_stagnation",
-                f"PM2.5 primary, cold ({weather.tmin_f:.0f}F < {COLD_TEMP_F}) and "
-                f"calm ({weather.wind_max_mph:.1f} mph < {CALM_WIND_SPEED_MPH})",
+                f"PM2.5 primary, cold ({weather.tmin_f:.0f}F < {LABEL_PARAMS.cold_temp_f}) and "
+                f"calm ({weather.wind_max_mph:.1f} mph < {LABEL_PARAMS.calm_wind_speed_mph})",
             )
         # 2d. Rural PM with no fire or smoke has no attributable source.
         if rural is True and upwind_fire is not True and smoke_density is None:
@@ -255,12 +252,12 @@ def classify_sample(
         if (
             weather is not None
             and weather.wind_max_mph is not None
-            and weather.wind_max_mph >= DUST_WIND_SPEED_MPH
+            and weather.wind_max_mph >= LABEL_PARAMS.dust_wind_speed_mph
         ):
             return _label(
                 "windblown_dust",
                 f"PM10 primary with wind {weather.wind_max_mph:.1f} mph "
-                f"at/above {DUST_WIND_SPEED_MPH}",
+                f"at/above {LABEL_PARAMS.dust_wind_speed_mph}",
             )
         # PM10 without dust-level wind is not clean dust.
         return _label(

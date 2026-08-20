@@ -2,8 +2,9 @@
 
 Open-Meteo's free archive endpoint (``https://archive-api.open-meteo.com/v1/archive``)
 serves ERA5 reanalysis weather for past date ranges. This module fetches daily
-aggregates (tmax / tmin / 10m max wind speed / dominant wind direction) for a
-set of sites and persists them as ``WeatherDailyRecord`` rows.
+aggregates (tmax / tmin / 10m max wind speed / dominant wind direction / daily
+precipitation sum / 10m max wind gust) for a set of sites and persists them as
+``WeatherDailyRecord`` rows.
 
 Raw values are stored as published in the requested units (Fahrenheit, mph);
 days with no value for a variable carry None, and days with no values at all
@@ -23,10 +24,12 @@ from backend.eval.accuracy.store import AccuracyStore
 
 WEATHER_ARCHIVE_URL = "https://archive-api.open-meteo.com/v1/archive"
 
-# Daily aggregates requested (temperature in Fahrenheit, wind in mph).
+# Daily aggregates requested (temperature in Fahrenheit, wind in mph,
+# precipitation in mm — Open-Meteo's default unit).
 _DAILY_PARAMS = (
     "temperature_2m_max,temperature_2m_min,"
-    "wind_speed_10m_max,wind_direction_10m_dominant"
+    "wind_speed_10m_max,wind_direction_10m_dominant,"
+    "precipitation_sum,wind_gusts_10m_max"
 )
 
 _TIMEOUT_S = 30.0
@@ -66,7 +69,7 @@ def fetch_weather_daily(
 
     ``site_id`` defaults to a coordinate-derived id (``"<lat>,<lon>"``) when not
     given, so the adapter works standalone; the sites loop passes the canonical
-    site id. Days whose four daily arrays are all null are skipped; a null in a
+    site id. Days whose six daily arrays are all null are skipped; a null in a
     single variable is kept as None on that field.
 
     Transient failures (HTTP 429, 5xx, and transport/connection errors) are
@@ -118,6 +121,8 @@ def fetch_weather_daily(
     tmin = daily.get("temperature_2m_min") or []
     wind_max = daily.get("wind_speed_10m_max") or []
     wind_dir = daily.get("wind_direction_10m_dominant") or []
+    precip = daily.get("precipitation_sum") or []
+    gust_max = daily.get("wind_gusts_10m_max") or []
 
     records: List[WeatherDailyRecord] = []
     for idx, date_local in enumerate(dates):
@@ -126,6 +131,8 @@ def fetch_weather_daily(
             _opt_float(tmin, idx),
             _opt_float(wind_max, idx),
             _opt_int(wind_dir, idx),
+            _opt_float(precip, idx),
+            _opt_float(gust_max, idx),
         )
         # A day with no values at all (missing row) is skipped entirely.
         if all(v is None for v in values):
@@ -139,6 +146,8 @@ def fetch_weather_daily(
             tmin_f=values[1],
             wind_max_mph=values[2],
             wind_dir_dominant_deg=values[3],
+            precipitation_mm=values[4],
+            wind_gust_max_mph=values[5],
         ))
     return records
 
@@ -156,10 +165,13 @@ def ingest_weather_for_sites(
     Returns the total number of records written.
 
     Resumable: when ``skip_existing`` is set (the default), any site that
-    already has at least one ``weather_daily`` row inside
-    ``[start_date, end_date]`` is skipped (a short ``skip <site>`` line is
-    written to stderr), so a timed-out run can be re-invoked against the same
-    store to finish the tail.
+    already has ``weather_daily`` coverage spanning the whole
+    ``[start_date, end_date]`` window is skipped (a short ``skip <site>`` line
+    is written to stderr), so a timed-out run can be re-invoked against the
+    same store to finish the tail. Sites with only partial overlap (rows
+    inside the window that do not span it end-to-end) are NOT skipped, so a
+    multi-year backfill over a range that partially overlaps pre-existing
+    data still fills the missing years.
 
     Parallel: sites are fetched concurrently via a ``ThreadPoolExecutor`` with
     ``workers`` threads (default 4) — the sync ``fetch_weather_daily`` is

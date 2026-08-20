@@ -20,15 +20,7 @@ from zoneinfo import ZoneInfo
 import httpx
 
 from backend.config import OPENAQ_API_KEY
-from backend.engine.params import (
-    BASELINE_DAYS,
-    MAX_READING_AGE_S,
-    MIN_PERCENT_COMPLETE,
-    OPENAQ_PREFERRED_RADIUS_M,
-    OPENAQ_RADIUS_M,
-    SAME_HOUR_MIN_SAMPLES,
-    SAME_HOUR_WINDOW_DAYS,
-)
+from backend.engine.params import get_params
 
 OPENAQ_BASE_URL = "https://api.openaq.org"
 OPENAQ_TIMEOUT_S = 3.0
@@ -188,11 +180,12 @@ async def discover_reference_monitors(
     if not OPENAQ_API_KEY:
         return []
 
-    results = await _fetch_location_results(lat, lon, radius_m or OPENAQ_PREFERRED_RADIUS_M)
+    p = get_params()
+    results = await _fetch_location_results(lat, lon, radius_m or p.openaq_preferred_radius_m)
     if results is None:
         return []
     if not results and radius_m is None:
-        results = await _fetch_location_results(lat, lon, OPENAQ_RADIUS_M)
+        results = await _fetch_location_results(lat, lon, p.openaq_radius_m)
         if results is None:
             return []
 
@@ -270,6 +263,7 @@ async def fetch_latest(location_id: int) -> Dict[str, Dict[str, Any]]:
     if cached is not None:
         return cached
 
+    p = get_params()
     readings: Dict[str, Dict[str, Any]] = {}
     if not OPENAQ_API_KEY:
         return readings
@@ -295,7 +289,7 @@ async def fetch_latest(location_id: int) -> Dict[str, Dict[str, Any]]:
         if normalized is None:
             continue
         dt_utc = _parse_utc((item.get("datetime") or {}).get("utc"))
-        if dt_utc is None or (now - dt_utc).total_seconds() > MAX_READING_AGE_S:
+        if dt_utc is None or (now - dt_utc).total_seconds() > p.max_reading_age_s:
             continue
         value, unit = normalized
         readings[sensor_info["name"]] = {
@@ -317,6 +311,7 @@ async def _fetch_aggregate_series(sensor_id: int, resource: str, datetime_from: 
 
     if not OPENAQ_API_KEY:
         return []
+    p = get_params()
     params = {
         "datetime_from": datetime_from.strftime("%Y-%m-%dT%H:%M:%SZ"),
         "limit": "1000",
@@ -338,7 +333,7 @@ async def _fetch_aggregate_series(sensor_id: int, resource: str, datetime_from: 
     for record in results:
         pct = _percent_complete(record)
         # Filter for aggregates with verified completeness
-        if pct is None or pct < MIN_PERCENT_COMPLETE:
+        if pct is None or pct < p.min_percent_complete:
             continue
         if record.get("value") is None:
             continue
@@ -360,8 +355,9 @@ async def fetch_daily_baseline(sensor_id: int) -> Optional[Dict[str, Any]]:
     means (all >=75% complete). Cached 24h.
     """
     now = datetime.now(dt_timezone.utc)
+    p = get_params()
     records = await _fetch_aggregate_series(
-        sensor_id, "days", now - timedelta(days=BASELINE_DAYS)
+        sensor_id, "days", now - timedelta(days=p.baseline_days)
     )
     if not records:
         return None
@@ -395,14 +391,15 @@ async def fetch_same_hour_baseline(
 
     Returns the percentile of the current reading among readings for the same
     local hour, plus the median of that same-hour distribution. Requires at
-    least SAME_HOUR_MIN_SAMPLES to avoid noisy votes.
+    least ``same_hour_min_samples`` to avoid noisy votes.
     """
     if current_value is None:
         return None
 
     now = datetime.now(dt_timezone.utc)
+    p = get_params()
     records = await _fetch_aggregate_series(
-        sensor_id, "hours", now - timedelta(days=SAME_HOUR_WINDOW_DAYS)
+        sensor_id, "hours", now - timedelta(days=p.same_hour_window_days)
     )
     if not records:
         return None
@@ -423,7 +420,7 @@ async def fetch_same_hour_baseline(
 
     current_hour = datetime.now(tz).hour
     same_hour_values = by_hour.get(current_hour, [])
-    if len(same_hour_values) < SAME_HOUR_MIN_SAMPLES:
+    if len(same_hour_values) < p.same_hour_min_samples:
         return None
 
     return {

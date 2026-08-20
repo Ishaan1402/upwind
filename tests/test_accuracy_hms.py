@@ -6,18 +6,22 @@ must be skipped. All HTTP is mocked at the ``httpx.Client`` level (sync
 client); no network access in these tests.
 """
 
+import gzip
 import io
 import json
 import sqlite3
+import tarfile
 import zipfile
 from datetime import datetime
 from unittest.mock import Mock, patch
 
 import pytest
 
+from backend.eval.accuracy.__main__ import main
 from backend.eval.accuracy.ingest.hms import (
     _extract_zip,
     fetch_hms_smoke_daily,
+    fetch_hms_smoke_year_tarball,
     ingest_hms_smoke_range,
     parse_hms_kml,
 )
@@ -348,5 +352,170 @@ def test_ingest_hms_smoke_range_skips_missing_days(tmp_path):
         assert sleep.call_count == 1
         # Day 06 tries KML then zip fallback; day 05 tries KML only.
         assert len(requested) == 3
+    finally:
+        store.close()
+
+
+# --------------------------------------------------------------------------
+# Yearly-tarball path (2003-2019 archives, per module docstring)
+# --------------------------------------------------------------------------
+
+_TARBALL_BASE = "https://satepsanone.nesdis.noaa.gov/pub/FIRE/HMS/hms_backup"
+
+
+def _year_tar_bytes(members):
+    """Build an in-memory ``.tar`` from ``(member_name, raw_bytes)`` pairs."""
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w") as tf:
+        for name, data in members:
+            info = tarfile.TarInfo(name)
+            info.size = len(data)
+            tf.addfile(info, io.BytesIO(data))
+    return buf.getvalue()
+
+
+def _mock_stream_response(status=200, content=b""):
+    """Response stand-in for the yearly-tarball download (``client.stream``)."""
+    resp = _mock_http_response(status=status, content=content)
+    resp.iter_bytes = Mock(return_value=iter([content]))
+    resp.raise_for_status = Mock()
+    resp.__enter__ = Mock(return_value=resp)
+    resp.__exit__ = Mock(return_value=False)
+    return resp
+
+
+def _make_stream_client(handler):
+    """Sync ``httpx.Client`` stand-in covering both ``.get`` (per-day path) and
+    ``.stream`` (tarball path): ``handler(url)`` -> resp."""
+    client = Mock()
+    client.get = Mock(side_effect=lambda url, **kwargs: handler(str(url)))
+    client.stream = Mock(side_effect=lambda method, url, **kwargs: handler(str(url)))
+    client.__enter__ = Mock(return_value=client)
+    client.__exit__ = Mock(return_value=False)
+    return client
+
+
+def test_fetch_hms_smoke_year_tarball_extracts_smoke_kmls(tmp_path):
+    kml_bytes = FIXTURE_KML_NS.encode("utf-8")
+    tar_bytes = _year_tar_bytes([
+        ("2019/KML/smoke20190702.kml.gz", gzip.compress(kml_bytes)),
+        ("2019/KML/smoke20190703.kml", kml_bytes),
+        ("2019/KML/fire20190702.kml.gz", gzip.compress(b"<kml/>")),
+    ])
+
+    def handler(url):
+        if url.endswith("/2019.tar"):
+            return _mock_stream_response(status=200, content=tar_bytes)
+        return _mock_stream_response(status=404)
+
+    client = _make_stream_client(handler)
+    with patch("backend.eval.accuracy.ingest.hms.httpx.Client", return_value=client):
+        paths = fetch_hms_smoke_year_tarball(2019, tmp_path)
+
+    # Only the daily smoke KMLs are extracted (gzipped and plain); the
+    # fire/hysplit product KMLs are NOT smoke records and are skipped.
+    assert sorted(p.name for p in paths) == ["smoke20190702.kml", "smoke20190703.kml"]
+    assert (tmp_path / "smoke20190702.kml").read_text() == FIXTURE_KML_NS
+    assert (tmp_path / "smoke20190703.kml").read_text() == FIXTURE_KML_NS
+    # The ~1GB tarball is cached for resumable re-runs (AQS-style).
+    assert (tmp_path / "2019.tar").read_bytes() == tar_bytes
+
+
+def test_ingest_hms_smoke_range_uses_yearly_tarball_and_advances_watermark(tmp_path):
+    db_path = tmp_path / "accuracy.db"
+    with AccuracyStore(db_path):
+        pass
+    tar_bytes = _year_tar_bytes([
+        ("2019/KML/smoke20190702.kml.gz", gzip.compress(FIXTURE_KML_NS.encode("utf-8"))),
+        ("2019/KML/smoke20190703.kml.gz", gzip.compress(FIXTURE_KML_NS.encode("utf-8"))),
+    ])
+    requested = []
+
+    def handler(url):
+        requested.append(url)
+        if url.endswith("/2019.tar"):
+            return _mock_stream_response(status=200, content=tar_bytes)
+        return _mock_stream_response(status=404)
+
+    client = _make_stream_client(handler)
+    with patch("backend.eval.accuracy.ingest.hms.httpx.Client", return_value=client), \
+         patch("backend.eval.accuracy.ingest.hms.time.sleep"), \
+         patch("backend.eval.accuracy.__main__.RAW_DATA_DIR", tmp_path / "raw"):
+        rc = main([
+            "ingest", "hms",
+            "--start", "2019-07-02", "--end", "2019-07-03",
+            "--db", str(db_path),
+        ])
+
+    assert rc == 0
+    # The CLI watermark advances exactly as it does for the per-day path.
+    with AccuracyStore(db_path) as store:
+        assert store.get_watermark("hms") == "2019-07-03"
+        records = store.fetch_hms_smoke()
+        # 2 days x 2 polygon placemarks each from the tarball's KMLs.
+        assert len(records) == 4
+        assert {r.date_local for r in records} == {"2019-07-02", "2019-07-03"}
+        for rec in records:
+            assert json.loads(rec.geometry_json)["type"] == "Polygon"
+    # One tarball fetch for the year; both days are served from it (no per-day
+    # requests, no .tar.gz fallback).
+    assert requested == [f"{_TARBALL_BASE}/2019.tar"]
+
+
+def test_ingest_hms_smoke_range_falls_back_to_per_day_when_tarball_missing(tmp_path):
+    store = AccuracyStore(tmp_path / "accuracy.db")
+    out_dir = tmp_path / "hms"
+    requested = []
+
+    def handler(url):
+        requested.append(url)
+        if url.endswith(".tar") or url.endswith(".tar.gz"):
+            return _mock_stream_response(status=404)
+        if "KML/smoke20190702.kml" in url:
+            return _mock_http_response(status=200, content=FIXTURE_KML_NS.encode("utf-8"))
+        return _mock_http_response(status=404)
+
+    client = _make_stream_client(handler)
+    try:
+        with patch("backend.eval.accuracy.ingest.hms.httpx.Client", return_value=client), \
+             patch("backend.eval.accuracy.ingest.hms.time.sleep"):
+            count = ingest_hms_smoke_range("2019-07-02", "2019-07-02", store, out_dir)
+
+        assert count == 2
+        assert store.count_hms_smoke() == 2
+        # Both tarball candidates 404'd, then the per-day KML path served the day.
+        assert requested[0] == f"{_TARBALL_BASE}/2019.tar"
+        assert requested[1] == f"{_TARBALL_BASE}/2019.tar.gz"
+        assert any("KML/smoke20190702.kml" in u for u in requested)
+    finally:
+        store.close()
+
+
+def test_ingest_hms_smoke_range_skips_empty_tarball_year(tmp_path):
+    """A tarball that exists but carries no smoke KMLs (e.g. 2016-2018)
+    ingests 0 records and does not hammer the per-day URLs."""
+    store = AccuracyStore(tmp_path / "accuracy.db")
+    out_dir = tmp_path / "hms"
+    requested = []
+    tar_bytes = _year_tar_bytes([
+        ("2019/KML/fire20190702.kml.gz", gzip.compress(b"<kml/>")),
+    ])
+
+    def handler(url):
+        requested.append(url)
+        if url.endswith("/2019.tar"):
+            return _mock_stream_response(status=200, content=tar_bytes)
+        return _mock_stream_response(status=404)
+
+    client = _make_stream_client(handler)
+    try:
+        with patch("backend.eval.accuracy.ingest.hms.httpx.Client", return_value=client), \
+             patch("backend.eval.accuracy.ingest.hms.time.sleep"):
+            count = ingest_hms_smoke_range("2019-07-02", "2019-07-02", store, out_dir)
+
+        assert count == 0
+        assert store.count_hms_smoke() == 0
+        # The tarball was fetched once and that is the only HTTP request.
+        assert requested == [f"{_TARBALL_BASE}/2019.tar"]
     finally:
         store.close()

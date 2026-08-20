@@ -6,6 +6,8 @@ from backend.services.aod import fetch_aod_signal
 from backend.services.firms import fetch_firms_hotspots
 from backend.services.hms import fetch_hms_smoke
 from backend.services.wfigs import fetch_wfigs_incident
+from backend.services.nws import fetch_dust_alert
+from backend.services.metar import fetch_metar_dust
 from backend.services.place_context import fetch_place_context
 from backend.services.incident_search import search_fire_incident_name
 from backend.services.openaq import (
@@ -16,15 +18,17 @@ from backend.services.openaq import (
     fetch_same_hour_baseline,
     sensor_id_for_parameter,
     monitor_source_label,
-    OPENAQ_RADIUS_M,
 )
-from backend.engine.params import AOD_HAZE, AQI_ELEVATED, OZONE_HOT_TEMP_F
+from backend.engine.params import get_params
+from backend.services.airnow import fetch_airnow_concentrations
 
 TOOL_STEPS = {
     "weather_vector": "Calculating Open-Meteo wind trajectory & temperature",
-    "aod_density": "Reading CAMS Aerosol Optical Depth (AOD) column density",
+    "aod_density": "Reading modeled Aerosol Optical Depth (AOD) column density",
     "hms_scan": "Checking NOAA smoke-plume analysis overhead",
     "wfigs_scan": "Checking federal wildfire incident registry",
+    "nws_dust_scan": "Checking NWS dust warnings/advisories",
+    "metar_dust_scan": "Checking nearby airport METARs for blowing dust",
     "firms_scan": "Scanning NASA FIRMS thermal hotspot clusters upwind",
     "web_search": "Searching public news & active incident feeds (Web Search)",
     "openaq_monitors": "Reading local monitor concentrations (OpenAQ)",
@@ -54,6 +58,7 @@ async def collect_openaq_signal(
     lat: float, lon: float, include_baselines: bool = True
 ) -> Dict[str, Any]:
     # Gather OpenAQ data; fetch past 3h US reference data for attribution. Fall back to "unavailable" on missing or stale data, skips baselines when include_baselines=False to save latency.
+    p = get_params()
     try:
         candidates = await discover_reference_monitors(lat, lon, limit=3)
         if not candidates:
@@ -73,7 +78,7 @@ async def collect_openaq_signal(
 
         # Widen radius when nearest monitor lacks fresh readings
         if not latest_by_id:
-            wider = await discover_reference_monitors(lat, lon, limit=10, radius_m=OPENAQ_RADIUS_M)
+            wider = await discover_reference_monitors(lat, lon, limit=10, radius_m=p.openaq_radius_m)
             if wider:
                 new_ids = [c["location_id"] for c in candidates]
                 wider_results = await asyncio.gather(
@@ -126,6 +131,8 @@ async def collect_openaq_signal(
             "co_ppm": None,
             "so2_ppb": None,
             "pm25_pm10_ratio": None,
+            "ratio_source": None,
+            "ratio_monitor_distance_km": None,
             "monitor": {
                 "location_id": monitor.get("location_id"),
                 "name": monitor.get("name"),
@@ -145,6 +152,22 @@ async def collect_openaq_signal(
 
         if pm25 and pm10 and pm10["value"] > 0:
             signal["pm25_pm10_ratio"] = round(pm25["value"] / pm10["value"], 2)
+            signal["ratio_source"] = "openaq"
+
+        # OpenAQ's nearest monitor lacks a co-located PM10: recover the
+        # fine/coarse discriminator from the AirNow raw hourly feed instead.
+        # AirNow serves real monitor data, so no "modeled" flag is needed.
+        if signal["pm25_pm10_ratio"] is None:
+            airnow = await fetch_airnow_concentrations(lat, lon)
+            if airnow and airnow.get("pm25_pm10_ratio") is not None:
+                signal["pm25_pm10_ratio"] = airnow["pm25_pm10_ratio"]
+                signal["ratio_source"] = "airnow"
+                site = airnow.get("site") or {}
+                signal["ratio_monitor_distance_km"] = site.get("distance_km")
+                signal["details"] += (
+                    f" PM2.5/PM10 ratio from AirNow monitor "
+                    f"{site.get('name') or site.get('aqsid')} {site.get('distance_km')} km away"
+                )
 
         for key, param in (("o3_ppb", "o3"), ("no2_ppb", "no2"), ("co_ppm", "co"), ("so2_ppb", "so2")):
             reading = readings.get(param)
@@ -239,10 +262,11 @@ async def iter_evidence_signals(
         return name
 
     async def _orchestrate():
+        p = get_params()
         try:
             async with asyncio.TaskGroup() as tg:
                 is_pm_elevated = (
-                    observation.get("aqi", 0) > AQI_ELEVATED and "PM" in observation.get("primary_pollutant", "").upper()
+                    observation.get("aqi", 0) > p.aqi_elevated and "PM" in observation.get("primary_pollutant", "").upper()
                 )
 
                 # T=0: independent position-only tasks
@@ -251,8 +275,14 @@ async def iter_evidence_signals(
                     "aod_density", fetch_aod_signal(lat, lon, observation.get("aerosol_optical_depth")), "AOD feed unavailable"
                 ))
                 hms_t = tg.create_task(_run_feed("hms_scan", fetch_hms_smoke(lat, lon), "NOAA HMS smoke feed unavailable"))
+                nws_t = tg.create_task(_run_feed(
+                    "nws_dust_scan", fetch_dust_alert(lat, lon), "NWS dust alerts unavailable"
+                ))
+                metar_t = tg.create_task(_run_feed(
+                    "metar_dust_scan", fetch_metar_dust(lat, lon), "METAR dust observations unavailable"
+                ))
                 openaq_t = tg.create_task(_run_feed(
-                    "openaq_monitors", collect_openaq_signal(lat, lon, include_baselines=observation.get("aqi", 0) > AQI_ELEVATED),
+                    "openaq_monitors", collect_openaq_signal(lat, lon, include_baselines=observation.get("aqi", 0) > p.aqi_elevated),
                     "OpenAQ concentration feed unavailable",
                 ))
                 place_t = tg.create_task(_run_feed(
@@ -283,9 +313,13 @@ async def iter_evidence_signals(
                 openaq = await openaq_t
                 place = await place_t
                 incident_name = await web_t if web_t else None
+                nws = await nws_t
+                metar = await metar_t
 
             signals = build_evidence_signals(
-                observation, weather, aod, firms, incident_name, openaq, hms, wfigs, place
+                observation, weather, aod, firms, incident_name, openaq, hms, wfigs, place,
+                nws_res=nws,
+                metar_res=metar,
             )
         except Exception as exc:
             # Fall back to empty signals on orchestration exception
@@ -335,6 +369,8 @@ def build_evidence_signals(
     hms_res: Optional[Dict[str, Any]] = None,
     wfigs_res: Optional[Dict[str, Any]] = None,
     place_res: Optional[Dict[str, Any]] = None,
+    nws_res: Optional[Dict[str, Any]] = None,
+    metar_res: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
     """
     Build the shared evidence signals list for both /api/why paths.
@@ -342,13 +378,16 @@ def build_evidence_signals(
     The non-streaming and streaming (SSE) endpoints must present identical
     evidence to scoring and the LLM. Incident names are passed through raw;
     scoring decides whether they are corroborated by hotspots (fire vote) or
-    become unverified-news open questions. hms_res/wfigs_res default to None
-    (treated as an unavailable feed) so callers that predate the new feeds
-    keep working.
+    become unverified-news open questions. hms_res/wfigs_res/place_res/
+    nws_res/metar_res default to None (treated as an unavailable feed) so
+    callers that predate the new feeds keep working.
     """
     hms_res = hms_res or {"status": "unavailable", "details": "NOAA HMS smoke feed not queried"}
     wfigs_res = wfigs_res or {"status": "unavailable", "details": "WFIGS incident feed not queried"}
     place_res = place_res or {"status": "unavailable", "details": "Census place context not queried"}
+    nws_res = nws_res or {"status": "unavailable", "details": "NWS dust alerts not queried"}
+    metar_res = metar_res or {"status": "unavailable", "details": "METAR dust observations not queried"}
+    p = get_params()
     aqi_val = observation.get("aqi", 0)
     primary_pollutant = observation.get("primary_pollutant", "").upper()
     pollutants = observation.get("pollutants", {})
@@ -360,19 +399,21 @@ def build_evidence_signals(
     is_pm10_primary = "PM10" in primary_pollutant
     is_pm25_primary = is_pm_primary and not is_pm10_primary
     # None-safe: a missing AQI is unknown, never elevated.
-    is_pm_elevated = aqi_val is not None and aqi_val > AQI_ELEVATED and is_pm_primary
+    is_pm_elevated = aqi_val is not None and aqi_val > p.aqi_elevated and is_pm_primary
 
     wind_speed = weather.get("wind_speed_mph") if weather else None
     wind_dir = weather.get("wind_direction_deg") if weather else None
     temp_f = weather.get("temperature_f") if weather else None
     boundary_layer_height_m = weather.get("boundary_layer_height_m") if weather else None
+    wind_gust_mph = weather.get("wind_gust_mph") if weather else None
+    precip_30d_in = weather.get("precip_30d_in") if weather else None
 
     signals = []
 
     # Signal 1: Aerosol Optical Depth Plume
     signals.append({
         "id": "aerosol_plume",
-        "label": "Atmospheric Column Particle Density (AOD)",
+        "label": "Modeled Atmospheric Column Particle Density (AOD)",
         "status": aod_res["status"],
         "density": aod_res.get("density"),
         "aod_value": aod_res.get("aod_value"),
@@ -391,9 +432,10 @@ def build_evidence_signals(
     # Signal 3: FIRMS Upwind Hotspots
     firms_status = firms_res["status"]
     firms_details = firms_res.get("details", "")
-    aod_value = float(aod_res.get("aod_value") or 0.0)
+    # AOD is modeled column loading, NOT fire evidence: it does not corroborate
+    # a news incident. Only verified FIRMS hotspots do.
     firms_present = firms_status == "present"
-    has_corroboration = firms_present or (aod_res.get("status") == "present" and aod_value >= AOD_HAZE)
+    has_corroboration = firms_present
 
     signals.append({
         "id": "firms_upwind",
@@ -420,11 +462,47 @@ def build_evidence_signals(
         "details": wfigs_res.get("details", ""),
     })
 
+    # Signal: NWS Dust Warning/Advisory (one-sided dust confirmation)
+    signals.append({
+        "id": "nws_dust_alert",
+        "label": "NWS Dust Warning/Advisory",
+        "status": nws_res.get("status", "unavailable"),
+        "event": nws_res.get("event"),
+        "headline": nws_res.get("headline"),
+        "severity": nws_res.get("severity"),
+        "details": nws_res.get("details", ""),
+    })
+
+    # Signal: Nearby Airport Blowing Dust (METAR) (one-sided dust confirmation)
+    signals.append({
+        "id": "metar_dust",
+        "label": "Nearby Airport Blowing Dust (METAR)",
+        "status": metar_res.get("status", "unavailable"),
+        "station": metar_res.get("station"),
+        "phenomenon": metar_res.get("phenomenon"),
+        "details": metar_res.get("details", ""),
+    })
+
     # Signal 5: Wind Field & Boundary Layer Height
     if weather and wind_speed is not None and wind_dir is not None:
         # Wind direction is meteorological origin (upwind bearing)
         upwind_dir = wind_dir % 360
-        
+
+        # Dust-confirmed flag (gust >= dust_gust_mph_min over antecedent-dry
+        # ground, on a PM10-primary elevated day) surfaces as a details note.
+        gust_dry_dust = (
+            is_pm10_primary and is_pm_elevated
+            and wind_gust_mph is not None and precip_30d_in is not None
+            and wind_gust_mph >= p.dust_gust_mph_min
+            and precip_30d_in <= p.dust_precip_30d_max_in
+        )
+        details = f"{wind_speed} mph from {wind_dir}°"
+        if gust_dry_dust:
+            details += (
+                f" — gusty wind ({wind_gust_mph:.0f} mph) over dry ground "
+                f"(30-day precip {precip_30d_in:.1f} in) confirms dust lofting"
+            )
+
         signals.append({
             "id": "wind",
             "label": "Surface Wind Vector",
@@ -433,7 +511,9 @@ def build_evidence_signals(
             "direction_deg": wind_dir,
             "upwind_deg": round(upwind_dir, 1),
             "boundary_layer_height_m": boundary_layer_height_m,
-            "details": f"{wind_speed} mph from {wind_dir}°"
+            "wind_gust_mph": wind_gust_mph,
+            "precip_30d_in": precip_30d_in,
+            "details": details
         })
     else:
         signals.append({
@@ -444,6 +524,8 @@ def build_evidence_signals(
             "direction_deg": None,
             "upwind_deg": None,
             "boundary_layer_height_m": None,
+            "wind_gust_mph": None,
+            "precip_30d_in": None,
             "details": "Wind vector data unavailable"
         })
 
@@ -467,7 +549,7 @@ def build_evidence_signals(
 
     # Signal 5: Ozone & Heat
     is_o3_primary = "O3" in primary_pollutant or "OZONE" in primary_pollutant
-    is_hot = (temp_f is not None) and (temp_f >= OZONE_HOT_TEMP_F)
+    is_hot = (temp_f is not None) and (temp_f >= p.ozone_hot_temp_f)
     
     signals.append({
         "id": "ozone_heat",

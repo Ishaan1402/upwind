@@ -18,12 +18,14 @@ from backend.eval.accuracy.__main__ import (
     label_command,
     main,
     report_command,
+    speciate_pm_command,
 )
 from backend.eval.accuracy.metrics import compute_metrics
 from backend.eval.accuracy.records import (
     AqsDailyRecord,
     FirmsHotspotRecord,
     HmsSmokeRecord,
+    SpeciationRow,
     WeatherDailyRecord,
 )
 from backend.eval.accuracy.runner import (
@@ -339,3 +341,122 @@ def test_main_label_subcommand_prints_distribution(capsys, tmp_path):
     assert '"samples": 3' in out
     assert '"wildfire_smoke": 1' in out
     assert '"ozone_episode": 1' in out
+
+
+# ---------------------------------------------------------------------------
+# speciate --scored (PM-scoped cross-tab with fresh scoring)
+# ---------------------------------------------------------------------------
+
+
+def _pm_speciation_store(store):
+    """Three site-days that each have AQS daily + speciation rows:
+    - smoke day: 88502 (non-FRM) PM2.5 elevated + HMS + upwind FIRMS + KNON
+      chemistry -> speciation smoke, scorer smoke,
+    - dust day: PM10 elevated + windy weather + high-soil chemistry ->
+      speciation dust, scorer dust,
+    - clean day: low-AQI PM2.5 with speciation rows but no PM elevation ->
+      must be excluded by the PM-elevated filter.
+    """
+    # Smoke day: IMPROVE-style site whose PM2.5 mass comes in under 88502.
+    store.insert_aqs_daily([AqsDailyRecord(
+        site_id=SITE_ID, state_code="06", county_code="049", site_num="0003",
+        parameter_code="88502", parameter_name="PM2.5 - Local Conditions", poc=1,
+        lat=LAT, lon=LON, date_local=SMOKE_DATE, concentration=55.0,
+        units="ug/m3 LC", aqi=141, method_code="181",
+    )])
+    store.insert_weather_daily(
+        [_weather(SMOKE_DATE, tmax=95.0, tmin=66.0, wind_max=12.0, wind_dir=250)]
+    )
+    store.insert_hms_smoke([_hms("light", _POLYGON_AROUND_SITE, SMOKE_DATE)])
+    store.insert_firms_hotspots([
+        _hotspot(41.0, -121.3, 8.0, "2020-07-01T08:00:00+00:00", "high"),
+        _hotspot(40.5, -121.0, 5.0, "2020-07-01T06:00:00+00:00", "nominal"),
+    ])
+    store.insert_speciation([
+        SpeciationRow(  # K -> KNON 1.0 - 0.6*0.5 = 0.7 >= 0.1 -> smoke
+            site_id=SITE_ID, date_local=SMOKE_DATE, parameter_code="88180",
+            parameter_name="Potassium", method_code="800",
+            method_name="IMPROVE Module A - Elements by X-Ray Fluorescence",
+            concentration=1.0, units="ug/m3 LC",
+        ),
+        SpeciationRow(
+            site_id=SITE_ID, date_local=SMOKE_DATE, parameter_code="88126",
+            parameter_name="Iron", method_code="800",
+            method_name="IMPROVE Module A - Elements by X-Ray Fluorescence",
+            concentration=0.5, units="ug/m3 LC",
+        ),
+    ])
+
+    # Dust day: PM10-elevated with windy weather and high IMPROVE soil.
+    dust_site = "35-013-0002"
+    dust_date = "2020-07-02"
+    dust_lat, dust_lon = 36.2664, -115.2201
+    store.insert_aqs_daily([AqsDailyRecord(
+        site_id=dust_site, state_code="35", county_code="013", site_num="0002",
+        parameter_code="81102", parameter_name="PM10", poc=1,
+        lat=dust_lat, lon=dust_lon, date_local=dust_date, concentration=150.0,
+        units="ug/m3 LC", aqi=155, method_code="120",
+    )])
+    store.insert_weather_daily([WeatherDailyRecord(
+        site_id=dust_site, lat=dust_lat, lon=dust_lon, date_local=dust_date,
+        tmax_f=92.0, tmin_f=70.0, wind_max_mph=22.0, wind_dir_dominant_deg=260,
+    )])
+    for code, conc in [("88104", 1.0), ("88165", 1.0), ("88111", 1.0),
+                       ("88126", 1.0), ("88161", 1.0)]:
+        store.insert_speciation([SpeciationRow(
+            site_id=dust_site, date_local=dust_date, parameter_code=code,
+            parameter_name=f"Param {code}", method_code="800",
+            method_name="IMPROVE Module A - Elements by X-Ray Fluorescence",
+            concentration=conc, units="ug/m3 LC",
+        )])
+
+    # Clean day: speciation rows but AQI 30 (not PM-elevated -> excluded).
+    store.insert_aqs_daily([_aqs(CLEAN_DATE, "88101", 8.1, 35)])
+    store.insert_weather_daily(
+        [_weather(CLEAN_DATE, tmax=75.0, tmin=60.0, wind_max=6.0, wind_dir=180)]
+    )
+    store.insert_speciation([
+        SpeciationRow(
+            site_id=SITE_ID, date_local=CLEAN_DATE, parameter_code="88180",
+            parameter_name="Potassium", method_code="800",
+            method_name="IMPROVE Module A - Elements by X-Ray Fluorescence",
+            concentration=1.0, units="ug/m3 LC",
+        ),
+    ])
+
+
+def test_speciate_pm_command_scopes_and_scores(tmp_path):
+    db_path = tmp_path / "accuracy.db"
+    with AccuracyStore(db_path) as store:
+        _pm_speciation_store(store)
+
+    result = speciate_pm_command(str(db_path))
+    # Only the PM-elevated days count; the AQI-35 day is excluded.
+    assert result["pm_elevated"] == 2
+    assert result["spec_distribution"] == {
+        "biomass_smoke": 1,
+        "mineral_dust": 1,
+        "mixed": 0,
+        "secondary_aerosol": 0,
+        "ambiguous": 0,
+    }
+    # The scorer agrees with speciation on both fixture days, and the 88502
+    # PM2.5 day was scored via the production path (smoke ranks first).
+    assert result["smoke_dust"] == {
+        "smoke_smoke": 1,
+        "dust_dust": 1,
+        "dust_smoke": 0,
+        "smoke_dust": 0,
+        "mixed": {
+            "days": 0,
+            "called_smoke": 0,
+            "called_dust": 0,
+        },
+    }
+    # Fresh scoring must not write predictions.
+    with AccuracyStore(db_path) as store:
+        assert store.count_predictions() == 0
+
+    # The CLI dispatch routes `speciate --scored` to this fresh-scoring path.
+    rc = main(["speciate", "--scored", "--db", str(db_path)])
+    assert rc == 0

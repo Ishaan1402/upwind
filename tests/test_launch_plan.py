@@ -97,6 +97,18 @@ def test_rate_limiter_why_stream_burst(client):
             "alignment": None,
             "details": "none",
         }),
+        patch("backend.engine.signals.fetch_dust_alert", new_callable=AsyncMock, return_value={
+            "status": "absent",
+            "event": None,
+            "headline": None,
+            "severity": None,
+        }),
+        patch("backend.engine.signals.fetch_metar_dust", new_callable=AsyncMock, return_value={
+            "status": "absent",
+            "station": None,
+            "raw": None,
+            "phenomenon": None,
+        }),
         patch("backend.engine.signals.collect_openaq_signal", new_callable=AsyncMock, return_value={
             "id": "openaq_concentrations",
             "label": "Local Monitor Concentrations (OpenAQ)",

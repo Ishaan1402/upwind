@@ -59,6 +59,18 @@ PLACE_RESULT = {
     "rural": None,
     "details": "no census key in test",
 }
+NWS_RESULT = {
+    "status": "absent",
+    "event": None,
+    "headline": None,
+    "severity": None,
+}
+METAR_RESULT = {
+    "status": "absent",
+    "station": None,
+    "raw": None,
+    "phenomenon": None,
+}
 
 
 def test_why_includes_openaq_signal_and_trace_step():
@@ -68,6 +80,8 @@ def test_why_includes_openaq_signal_and_trace_step():
          patch("backend.engine.signals.fetch_aod_signal", new_callable=AsyncMock, return_value=AOD_RESULT), \
          patch("backend.engine.signals.fetch_hms_smoke", new_callable=AsyncMock, return_value=HMS_RESULT), \
          patch("backend.engine.signals.fetch_wfigs_incident", new_callable=AsyncMock, return_value=WFIGS_RESULT), \
+         patch("backend.engine.signals.fetch_dust_alert", new_callable=AsyncMock, return_value=NWS_RESULT), \
+         patch("backend.engine.signals.fetch_metar_dust", new_callable=AsyncMock, return_value=METAR_RESULT), \
          patch("backend.engine.signals.fetch_firms_hotspots", new_callable=AsyncMock, return_value=FIRMS_RESULT), \
          patch("backend.engine.signals.search_fire_incident_name", new_callable=AsyncMock, return_value=None), \
          patch("backend.engine.signals.collect_openaq_signal", new_callable=AsyncMock, return_value=PRESENT_SIGNAL), \
@@ -103,6 +117,8 @@ def test_why_cache_key_includes_aqi_and_pollutant():
          patch("backend.engine.signals.fetch_aod_signal", new_callable=AsyncMock, return_value=AOD_RESULT), \
          patch("backend.engine.signals.fetch_hms_smoke", new_callable=AsyncMock, return_value=HMS_RESULT), \
          patch("backend.engine.signals.fetch_wfigs_incident", new_callable=AsyncMock, return_value=WFIGS_RESULT), \
+         patch("backend.engine.signals.fetch_dust_alert", new_callable=AsyncMock, return_value=NWS_RESULT), \
+         patch("backend.engine.signals.fetch_metar_dust", new_callable=AsyncMock, return_value=METAR_RESULT), \
          patch("backend.engine.signals.fetch_firms_hotspots", new_callable=AsyncMock, return_value=FIRMS_RESULT), \
          patch("backend.engine.signals.search_fire_incident_name", new_callable=AsyncMock, return_value=None), \
          patch("backend.engine.signals.collect_openaq_signal", new_callable=AsyncMock, return_value=PRESENT_SIGNAL), \
@@ -144,6 +160,8 @@ def test_skipped_web_search_still_resolves():
          patch("backend.engine.signals.fetch_aod_signal", new_callable=AsyncMock, return_value=AOD_RESULT), \
          patch("backend.engine.signals.fetch_hms_smoke", new_callable=AsyncMock, return_value=HMS_RESULT), \
          patch("backend.engine.signals.fetch_wfigs_incident", new_callable=AsyncMock, return_value=WFIGS_RESULT), \
+         patch("backend.engine.signals.fetch_dust_alert", new_callable=AsyncMock, return_value=NWS_RESULT), \
+         patch("backend.engine.signals.fetch_metar_dust", new_callable=AsyncMock, return_value=METAR_RESULT), \
          patch("backend.engine.signals.fetch_firms_hotspots", new_callable=AsyncMock, return_value=FIRMS_RESULT), \
          patch("backend.engine.signals.collect_openaq_signal", new_callable=AsyncMock, return_value=PRESENT_SIGNAL), \
          patch("backend.engine.signals.fetch_place_context", new_callable=AsyncMock, return_value=PLACE_RESULT), \
@@ -164,6 +182,8 @@ def test_stream_emits_openaq_events_and_signal():
          patch("backend.engine.signals.fetch_aod_signal", new_callable=AsyncMock, return_value=AOD_RESULT), \
          patch("backend.engine.signals.fetch_hms_smoke", new_callable=AsyncMock, return_value=HMS_RESULT), \
          patch("backend.engine.signals.fetch_wfigs_incident", new_callable=AsyncMock, return_value=WFIGS_RESULT), \
+         patch("backend.engine.signals.fetch_dust_alert", new_callable=AsyncMock, return_value=NWS_RESULT), \
+         patch("backend.engine.signals.fetch_metar_dust", new_callable=AsyncMock, return_value=METAR_RESULT), \
          patch("backend.engine.signals.fetch_firms_hotspots", new_callable=AsyncMock, return_value=FIRMS_RESULT), \
          patch("backend.engine.signals.search_fire_incident_name", new_callable=AsyncMock, return_value=None), \
          patch("backend.engine.signals.collect_openaq_signal", new_callable=AsyncMock, return_value=PRESENT_SIGNAL), \
@@ -211,6 +231,8 @@ def test_stream_and_post_share_identical_signals():
         patch("backend.engine.signals.fetch_aod_signal", new_callable=AsyncMock, return_value=AOD_RESULT),
         patch("backend.engine.signals.fetch_hms_smoke", new_callable=AsyncMock, return_value=HMS_RESULT),
         patch("backend.engine.signals.fetch_wfigs_incident", new_callable=AsyncMock, return_value=WFIGS_RESULT),
+        patch("backend.engine.signals.fetch_dust_alert", new_callable=AsyncMock, return_value=NWS_RESULT),
+        patch("backend.engine.signals.fetch_metar_dust", new_callable=AsyncMock, return_value=METAR_RESULT),
         patch("backend.engine.signals.fetch_firms_hotspots", new_callable=AsyncMock, return_value=FIRMS_RESULT),
         patch("backend.engine.signals.search_fire_incident_name", new_callable=AsyncMock, return_value="Test Fire"),
         patch("backend.engine.signals.collect_openaq_signal", new_callable=AsyncMock, return_value=PRESENT_SIGNAL),

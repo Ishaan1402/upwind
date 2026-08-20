@@ -27,8 +27,10 @@ from backend.eval.accuracy.store import AccuracyStore
 
 AQS_BASE_URL = "https://aqs.epa.gov/aqsweb/airdata"
 
-# Daily summary parameters ingested (PM2.5 FRM/FEM, PM10, O3, NO2, CO, SO2).
-PARAMETER_CODES: List[str] = ["88101", "81102", "44201", "42602", "42101", "42401"]
+# Daily summary parameters ingested: PM2.5 FRM/FEM (88101), PM2.5 non-FRM mass
+# (88502 — the code IMPROVE speciation sites report PM2.5 mass under), PM10
+# (81102), O3 (44201), NO2 (42602), CO (42101), SO2 (42401).
+PARAMETER_CODES: List[str] = ["88101", "88502", "81102", "44201", "42602", "42101", "42401"]
 
 _DOWNLOAD_TIMEOUT_S = 60.0
 
@@ -192,9 +194,9 @@ def _extract_csvs(zip_path: Path, out_dir: Path) -> List[Path]:
 
 
 def download_aqs_year(year: int, out_dir: Path) -> List[Path]:
-    """Download the 6 ``daily_<param>_<year>.zip`` files plus ``aqs_sites.zip``
-    for ``year`` into ``out_dir`` and extract them, returning the extracted CSV
-    paths.
+    """Download the ``daily_<param>_<year>.zip`` files (one per
+    ``PARAMETER_CODES``) plus ``aqs_sites.zip`` for ``year`` into ``out_dir``
+    and extract them, returning the extracted CSV paths.
 
     Resumable: an already-downloaded zip is skipped. The sites snapshot is
     fetched from the year-independent ``aqs_sites.zip`` URL but saved as
@@ -231,7 +233,7 @@ def _parse_year_csvs(csv_paths: Iterable[Path]) -> List[AqsDailyRecord]:
 
 
 def ingest_aqs_year(year: int, store: AccuracyStore, out_dir: Path) -> int:
-    """Download, parse, and persist all 6 daily parameters for ``year``.
+    """Download, parse, and persist all daily parameters for ``year``.
 
     Returns the number of records written to the store.
     """

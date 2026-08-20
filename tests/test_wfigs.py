@@ -1,9 +1,9 @@
 import asyncio
+import pytest
 from unittest.mock import AsyncMock, Mock, patch
 from backend.services.wfigs import (
     fetch_wfigs_incident,
     _select_relevant_wildfires,
-    WFIGS_MAX_RADIUS_MILES,
 )
 
 
@@ -206,6 +206,27 @@ def _mock_client(geojson=None, raise_exc=False, status=200):
     return mock_client
 
 
+@pytest.mark.honesty
+def test_select_relevant_wildfires_angular_decay_grades_upwind():
+    """Track C Part 2: equal-size, equidistant fires rank strictly by angular
+    alignment to the upwind bearing (on-axis > 45 deg off > 90 deg off) instead
+    of every sector member counting as a full 'upwind' 4x boost."""
+    target_lat, target_lon = 45.0, -121.0
+    features = [
+        _wf_feature("Ninety Off", -121.0, 44.8551, size=10000, contained=0),    # 10 mi S (180 deg)
+        _wf_feature("Forty Five", -121.1449, 44.8975, size=10000, contained=0),  # 10 mi SW (225 deg)
+        _wf_feature("On Axis", -121.205, 45.0, size=10000, contained=0),         # 10 mi W (270 deg)
+    ]
+    incidents = _select_relevant_wildfires(features, target_lat, target_lon, wind_dir_deg=270.0)
+
+    assert [i["name"] for i in incidents] == ["On Axis", "Forty Five", "Ninety Off"]
+    assert all(i["is_upwind"] for i in incidents)
+    assert incidents[0]["relevance"] > incidents[1]["relevance"] > incidents[2]["relevance"]
+    # On-axis keeps the full 4x bonus over the neutral 90-deg-off fire.
+    assert incidents[0]["relevance"] == pytest.approx(incidents[2]["relevance"] * 4.0, rel=0.05)
+
+
+@pytest.mark.honesty
 def test_fetch_wfigs_present_selects_top_and_alignment():
     geojson = _geojson([_wf_feature("Grasshopper Fire", -120.0, 45.0, size=35000, contained=19)])
     with patch("backend.services.wfigs.httpx.AsyncClient", return_value=_mock_client(geojson)):

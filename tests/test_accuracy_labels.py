@@ -25,6 +25,7 @@ DATE = "2023-07-01"
 
 _PARAM_NAMES = {
     "88101": "PM2.5",
+    "88502": "PM2.5",
     "81102": "PM10",
     "44201": "O3",
     "42602": "NO2",
@@ -314,12 +315,33 @@ def test_label_classes_mirror_scorer_hypotheses():
 def test_parameter_to_pollutant_schema_map():
     assert PARAMETER_TO_POLLUTANT == {
         "88101": "PM2.5",
+        "88502": "PM2.5",
         "81102": "PM10",
         "44201": "O3",
         "42602": "NO2",
         "42101": "CO",
         "42401": "SO2",
     }
+
+
+def test_build_observation_treats_88502_as_pm25_mass():
+    # IMPROVE speciation sites report PM2.5 mass under the non-FRM 88502 code;
+    # it must aggregate exactly like FRM/FEM 88101 (AQI + concentration).
+    obs = build_observation([_aqs("88502", 141, 55.0)])
+    assert obs.aqi == 141
+    assert obs.primary_pollutant == "PM2.5"
+    assert obs.pollutant_aqi == {"PM2.5": 141}
+    assert obs.concentrations == {"PM2.5": 55.0}
+
+
+def test_build_observation_88502_competes_with_88101():
+    # A site reporting both FRM/FEM and non-FRM PM2.5 buckets both into PM2.5;
+    # the max AQI/concentration wins (no double counting across buckets).
+    obs = build_observation([_aqs("88101", 42, 15.5), _aqs("88502", 60, 21.0)])
+    assert obs.aqi == 60
+    assert obs.primary_pollutant == "PM2.5"
+    assert obs.pollutant_aqi == {"PM2.5": 60}
+    assert obs.concentrations == {"PM2.5": 21.0}
 
 
 # ---------------------------------------------------------------------------

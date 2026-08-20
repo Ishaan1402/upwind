@@ -5,16 +5,15 @@ import pytest
 import asyncio
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock, patch
+from backend.engine.params import DEFAULT
 from backend.services.firms import (
     calculate_bearing_degrees,
     calculate_haversine_distance,
     angular_difference,
+    angular_upwind_factor,
     filter_upwind_hotspots,
     firms_search_radius_miles,
     cluster_firms_hotspots,
-    FIRMS_CLUSTER_RADIUS_KM,
-    FIRMS_MIN_CLUSTER_FRP,
-    FIRMS_MIN_RADIUS_MILES,
     parse_firms_csv_rows,
     fetch_firms_hotspots,
 )
@@ -138,8 +137,8 @@ def test_filter_upwind_hotspots_no_wind_returns_all():
     assert len(res) == 2
 
 def test_firms_search_radius_floors_calm_winds():
-    assert firms_search_radius_miles(0.0) == FIRMS_MIN_RADIUS_MILES
-    assert firms_search_radius_miles(3.0) == FIRMS_MIN_RADIUS_MILES
+    assert firms_search_radius_miles(0.0) == DEFAULT.firms_min_radius_miles
+    assert firms_search_radius_miles(3.0) == DEFAULT.firms_min_radius_miles
     assert firms_search_radius_miles(20.0) == 100.0
     assert firms_search_radius_miles(50.0) == 150.0
 
@@ -246,22 +245,23 @@ def test_fetch_firms_hotspots_parses_viirs_csv_response():
     assert result["nearest"]["relevance"] > 0
     assert "strongest cluster" in result["details"]
 
-    # Cluster response shape: clusters ranked by relevance, 'nearest' is the
-    # strongest UPWIND cluster (not the strongest overall) and keeps every
-    # field score.py reads.
+    # Cluster response shape: clusters ranked by relevance; 'nearest' is the
+    # top cluster by relevance across ALL clusters and keeps every field
+    # score.py reads.
     assert len(result["clusters"]) == result["total_count"]
     assert result["nearest"]["distance_miles"] > 0
     assert result["nearest"]["distance_km"] > 0
     assert result["nearest"]["bearing"] in ("N", "NE", "E", "SE", "S", "SW", "W", "NW")
     assert "detections" in result["nearest"]
     assert "age_hours" in result["nearest"]
-    assert result["nearest"]["is_upwind"] is True
     assert result["clusters"][0]["relevance"] >= result["clusters"][1]["relevance"]
-    # The strong downwind cluster (5.2 MW) may rank first overall without being
-    # the named 'nearest' source; the weaker upwind cluster is the one reported.
+    # The strong downwind cluster (5.2 MW) ranks first overall AND claims the
+    # named 'nearest' slot (top relevance across all clusters); alignment and
+    # count still report the upwind subset.
+    assert result["nearest"]["is_upwind"] is False
     assert result["clusters"][0]["is_upwind"] is False
     assert result["clusters"][0]["frp"] == pytest.approx(5.2)
-    assert result["nearest"]["frp"] == pytest.approx(1.9)  # cluster frp rounded to 0.1
+    assert result["nearest"]["frp"] == pytest.approx(5.2)
     # Clusters expose peak intensity and max confidence weight.
     assert "peak_frp" in result["clusters"][0]
     assert "confidence_weight" in result["clusters"][0]
@@ -356,7 +356,7 @@ def test_fetch_firms_drops_low_confidence_detections():
 
 
 def test_fetch_firms_clusters_merge_pixels_with_summed_frp():
-    """Two pixels within FIRMS_CLUSTER_RADIUS_KM merge into one cluster with
+    """Two pixels within DEFAULT.firms_cluster_radius_km merge into one cluster with
     summed FRP and detections == 2; that cluster outranks a lone zero-FRP pixel."""
     csv = (
         f"{FIRMS_CSV_HEADER}\n"
@@ -437,10 +437,12 @@ def test_fetch_firms_high_confidence_outranks_nominal():
     assert result["nearest"]["confidence"] == "high"
 
 
-def test_fetch_firms_nearest_is_upwind_when_stronger_downwind_exists():
-    """A strong downwind cluster must not be reported as the upwind source:
-    when any upwind cluster exists, 'nearest' is the strongest upwind cluster
-    and alignment is 'upwind', even if a downwind cluster outranks it."""
+@pytest.mark.honesty
+def test_fetch_firms_nearest_is_top_relevance_even_with_upwind_cluster():
+    """Track C Part 3: 'nearest' is the top cluster by relevance across ALL
+    clusters, so a far larger downwind fire claims the named slot; alignment
+    stays 'upwind' and count still reflects the upwind subset (corroboration
+    gating is untouched)."""
     csv = (
         f"{FIRMS_CSV_HEADER}\n"
         "43.586,-119.20,297.1,0.6,0.4,2026-07-27,940,N,VIIRS,n,2.0URT,287.1,3,N\n"    # upwind, weak
@@ -452,15 +454,15 @@ def test_fetch_firms_nearest_is_upwind_when_stronger_downwind_exists():
     assert result["status"] == "present"
     assert result["alignment"] == "upwind"
     assert result["count"] == 1
-    # The strong downwind cluster outranks overall but must not win 'nearest'.
+    # The strong downwind cluster outranks overall and now wins 'nearest'.
     assert result["clusters"][0]["frp"] == 60.0
     assert result["clusters"][0]["is_upwind"] is False
     assert result["clusters"][0]["relevance"] > result["clusters"][1]["relevance"]
-    # 'nearest' is the strongest upwind cluster, with the full score.py contract.
-    assert result["nearest"]["is_upwind"] is True
-    assert result["nearest"]["frp"] == 3.0
-    assert result["nearest"]["frp"] < result["clusters"][0]["frp"]
-    assert result["nearest"]["relevance"] == result["clusters"][1]["relevance"]
+    # 'nearest' is the top-relevance cluster, with the full score.py contract.
+    assert result["nearest"]["is_upwind"] is False
+    assert result["nearest"]["frp"] == 60.0
+    assert result["nearest"]["frp"] > result["clusters"][1]["frp"]
+    assert result["nearest"]["relevance"] == result["clusters"][0]["relevance"]
     for field in ("distance_miles", "bearing", "distance_km", "bearing_deg",
                   "frp", "is_upwind", "relevance", "age_hours", "detections"):
         assert field in result["nearest"]
@@ -494,7 +496,7 @@ def test_cluster_firms_peak_frp_and_persistence():
 
 def test_cluster_firms_persistence_capped():
     """Five co-located detections would give 1.0 + 0.2*4 = 1.8, but the
-    persistence factor is capped at FIRMS_PERSISTENCE_CAP (1.6)."""
+    persistence factor is capped at DEFAULT.firms_persistence_cap (1.6)."""
     pixels = [
         {"lat": 43.586, "lon": -119.100, "frp": 2.0, "age_hours": 0.0,
          "confidence": "nominal", "confidence_weight": 0.7, "is_upwind": True},
@@ -624,7 +626,7 @@ def _synthetic_hotspot(lat: float, lon: float, frp: float) -> dict:
     }
 
 
-def _naive_cluster_signature(hotspots, cluster_radius_km=FIRMS_CLUSTER_RADIUS_KM):
+def _naive_cluster_signature(hotspots, cluster_radius_km=DEFAULT.firms_cluster_radius_km):
     """O(hotspots x clusters) reference: replicate the pre-grid greedy centroid
     clustering exactly and return the surviving clusters' signature as
     (ordered member (lat, lon) tuples, summed FRP rounded like the output, detections)."""
@@ -651,7 +653,7 @@ def _naive_cluster_signature(hotspots, cluster_radius_km=FIRMS_CLUSTER_RADIUS_KM
     return [
         (tuple((m["lat"], m["lon"]) for m in g), round(sum(m["frp"] for m in g), 1), len(g))
         for g in member_groups
-        if sum(m["frp"] for m in g) >= FIRMS_MIN_CLUSTER_FRP
+        if sum(m["frp"] for m in g) >= DEFAULT.firms_min_cluster_frp
     ]
 
 
@@ -660,6 +662,73 @@ def _grid_cluster_signature(clusters):
         (tuple((p["lat"], p["lon"]) for p in c["pixels"]), c["frp"], c["detections"])
         for c in clusters
     ]
+
+
+@pytest.mark.honesty
+def test_angular_upwind_factor_decays_with_angular_difference():
+    """Track C Part 2 (pure function): the upwind multiplier is graded by the
+    cosine of the angular difference from the upwind bearing - full 4x on-axis,
+    ~3.1x at 45 deg off, and exactly 1x at/above 90 deg off (never below 1.0)."""
+    factor = angular_upwind_factor
+    assert factor(0.0, 4.0) == pytest.approx(4.0)
+    assert factor(45.0, 4.0) == pytest.approx(1.0 + 3.0 * math.cos(math.radians(45.0)))
+    assert factor(90.0, 4.0) == pytest.approx(1.0)
+    assert factor(135.0, 4.0) == pytest.approx(1.0)
+    assert factor(180.0, 4.0) == pytest.approx(1.0)
+    assert factor(0.0, 4.0) > factor(45.0, 4.0) > factor(90.0, 4.0)
+    # Bonus-neutral wind (bonus 1.0) always stays 1.0.
+    assert factor(0.0, 1.0) == 1.0
+    assert factor(90.0, 1.0) == 1.0
+
+
+@pytest.mark.honesty
+def test_fetch_firms_angular_decay_on_axis_outranks_off_axis():
+    """Track C Part 2 integration: three identical-FRP, equidistant clusters at
+    0, 45, and 90 degrees off the upwind bearing rank strictly by angular
+    alignment (4x, ~3.1x, 1x) instead of every upwind-sector pixel counting as
+    a full 'upwind' boost."""
+    target_lat, target_lon = 45.0, -120.0
+
+    def _pixel(bearing_deg: float, frp: float) -> str:
+        # Place a pixel exactly 10 mi from the target at the given bearing.
+        lat = target_lat + 10.0 * math.cos(math.radians(bearing_deg)) / 69.0
+        lon = target_lon + 10.0 * math.sin(math.radians(bearing_deg)) / (69.0 * math.cos(math.radians(target_lat)))
+        return f"{lat:.5f},{lon:.5f},297.1,0.6,0.4,2026-07-27,940,N,VIIRS,n,2.0URT,287.1,{frp},N"
+
+    csv = f"{FIRMS_CSV_HEADER}\n" + "\n".join([
+        _pixel(270.0, 20.0),  # on-axis (wind FROM west)
+        _pixel(225.0, 20.0),  # 45 deg off
+        _pixel(180.0, 20.0),  # 90 deg off (sector edge)
+    ])
+    result, _ = _mock_fetch(csv, target_lat=target_lat, target_lon=target_lon,
+                         wind_dir_deg=270.0, wind_speed_mph=3.0, reference_utc=REFERENCE_UTC)
+
+    assert result["status"] == "present"
+    rel = {round(h["bearing_deg"]): h["relevance"] for h in result["hotspots"]}
+    assert rel[270] > rel[225] > rel[180]
+    # The 45-deg-off source keeps a real (but reduced) upwind boost.
+    assert rel[225] > rel[180]
+    # On-axis keeps the full 4x bonus; 90-deg-off drops to neutral.
+    assert rel[270] == pytest.approx(rel[180] * 4.0, rel=0.05)
+
+
+def test_cluster_firms_angular_decay_grades_by_cluster_bearing():
+    """Track C Part 2 (cluster level): the cluster relevance multiplier uses the
+    same graded angular factor when an upwind target bearing is supplied."""
+    pixels = [
+        {"lat": 43.586, "lon": -119.200, "frp": 3.0, "age_hours": 0.0,
+         "confidence": "nominal", "confidence_weight": 0.7, "is_upwind": True},
+    ]
+    # On-axis cluster (due west of the target under a westerly wind).
+    on_axis = cluster_firms_hotspots(pixels, 43.586, -119.054, upwind_target_deg=270.0)[0]
+    assert on_axis["is_upwind"] is True
+    _, dist_mi = calculate_haversine_distance(43.586, -119.054, 43.586, -119.200)
+    full_bonus = round(3.0 * 0.7 * 1.0 * angular_upwind_factor(0.0, 4.0)
+                       * (1.0 / (dist_mi + 1.0)) * 1.0, 1)
+    assert on_axis["relevance"] == full_bonus
+    # Same pixel, but upwind bearing 90 deg away -> neutral 1x.
+    edge = cluster_firms_hotspots(pixels, 43.586, -119.054, upwind_target_deg=180.0)[0]
+    assert edge["relevance"] < on_axis["relevance"]
 
 
 def test_cluster_firms_grid_matches_naive_on_dense_synthetic_cloud():

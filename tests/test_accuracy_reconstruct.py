@@ -37,6 +37,7 @@ LON = -120.0
 
 _PARAM_NAMES = {
     "88101": "PM2.5",
+    "88502": "PM2.5",
     "81102": "PM10",
     "44201": "O3",
     "42602": "NO2",
@@ -184,6 +185,30 @@ def test_openaq_sig_unavailable_without_pm():
     sig = _openaq_sig_from_aqs([_aqs("44201", 0.055, None, units="ppm")], DATE)
     assert sig["status"] == "unavailable"
     assert "No PM concentration records" in sig["details"]
+
+
+def test_openaq_sig_pm25_from_non_frm_88502():
+    # A speciation site that reports PM2.5 mass only under the non-FRM 88502
+    # code must still populate the signal the scorer reads as PM2.5.
+    sig = _openaq_sig_from_aqs([_aqs("88502", 55.0, 141)], DATE)
+    assert sig["status"] == "present"
+    assert sig["pm25"] == 55.0
+    assert sig["pm10"] is None
+    assert sig["pm25_pm10_ratio"] is None
+
+
+def test_openaq_sig_88502_vs_88101_best_row_wins():
+    # When both codes report the day, the max-AQI row across both wins (the
+    # non-FRM row here), matching build_observation's PM2.5 aggregation.
+    sig = _openaq_sig_from_aqs(
+        [
+            _aqs("88101", 20.0, 60),
+            _aqs("88502", 55.0, 141),
+        ],
+        DATE,
+    )
+    assert sig["status"] == "present"
+    assert sig["pm25"] == 55.0
 
 
 def test_openaq_sig_poc_selection_highest_aqi_wins():
@@ -364,6 +389,65 @@ def test_firms_res_absent_for_empty_pixels():
     assert res["count"] == 0
     assert res["nearest"] is None
     assert res["alignment"] is None
+
+
+def test_firms_res_threads_upwind_target_deg_and_names_clusters_0(monkeypatch):
+    """Track C ISSUE 2: reconstruction must pass the historical wind bearing
+    into clustering (graded angular factor, like live) and name the strongest
+    OVERALL cluster 'nearest' - even when a large downwind fire outranks the
+    upwind ones - while count/alignment still describe the upwind subset."""
+    from backend.eval.accuracy import reconstruct as reconstruct_mod
+
+    pixels = [
+        {
+            "lat": 41.0, "lon": -121.3, "frp": 3.0, "age_hours": 4.0,
+            "is_upwind": True, "confidence": "high", "confidence_weight": 1.0,
+            "distance_km": 99.0, "distance_miles": 61.5, "bearing": "NW",
+            "bearing_deg": 316.0, "relevance": 0.0,
+        },
+        {
+            "lat": 39.5, "lon": -121.0, "frp": 20.0, "age_hours": 6.0,
+            "is_upwind": False, "confidence": "high", "confidence_weight": 1.0,
+            "distance_km": 90.0, "distance_miles": 55.9, "bearing": "S",
+            "bearing_deg": 180.0, "relevance": 0.0,
+        },
+    ]
+
+    captured = {}
+
+    def _spy(hotspots, target_lat, target_lon, cluster_radius_km=None, upwind_target_deg=None):
+        captured["upwind_target_deg"] = upwind_target_deg
+        # Strong downwind cluster first, weaker upwind cluster second.
+        return [
+            {
+                "lat": 39.5, "lon": -121.0, "frp": 20.0, "peak_frp": 20.0,
+                "detections": 1, "age_hours": 6.0, "distance_km": 90.0,
+                "distance_miles": 55.9, "bearing": "S", "bearing_deg": 180.0,
+                "is_upwind": False, "confidence": "high",
+                "confidence_weight": 1.0, "relevance": 100.0,
+            },
+            {
+                "lat": 41.0, "lon": -121.3, "frp": 3.0, "peak_frp": 3.0,
+                "detections": 1, "age_hours": 4.0, "distance_km": 99.0,
+                "distance_miles": 61.5, "bearing": "NW", "bearing_deg": 316.0,
+                "is_upwind": True, "confidence": "high",
+                "confidence_weight": 1.0, "relevance": 10.0,
+            },
+        ]
+
+    monkeypatch.setattr(reconstruct_mod, "cluster_firms_hotspots", _spy)
+    res = reconstruct_mod._firms_res_from_hotspots(pixels, LAT, LON, wind_dir_deg=250, radius_mi=75)
+
+    # The historical wind direction (dominant, mod 360) reaches clustering.
+    assert captured["upwind_target_deg"] == 250.0
+    assert res["status"] == "present"
+    # count/alignment still report the upwind subset (unchanged semantics).
+    assert res["alignment"] == "upwind"
+    assert res["count"] == 1
+    assert res["total_count"] == 2
+    # 'nearest' is the top cluster by relevance across ALL clusters (live behavior).
+    assert res["nearest"] is res["clusters"][0]
+    assert res["nearest"]["is_upwind"] is False
 
 
 # ---------------------------------------------------------------------------

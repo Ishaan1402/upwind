@@ -65,14 +65,18 @@ async def fetch_openmeteo_aqi(lat: float, lon: float) -> Optional[Dict[str, Any]
 
 async def fetch_openmeteo_weather(lat: float, lon: float) -> Optional[Dict[str, Any]]:
     """
-    Fetch current temperature (°F), 10m wind direction & speed (mph), and boundary layer height (m) from Open-Meteo.
+    Fetch current temperature (°F), 10m wind direction & speed (mph), 10m wind
+    gust (mph), boundary layer height (m), and the past-30-day precipitation
+    sum (inches) from Open-Meteo in one call.
     """
     params = {
         "latitude": lat,
         "longitude": lon,
-        "current": "temperature_2m,wind_speed_10m,wind_direction_10m,boundary_layer_height",
+        "current": "temperature_2m,wind_speed_10m,wind_direction_10m,wind_gusts_10m,boundary_layer_height",
         "temperature_unit": "fahrenheit",
-        "wind_speed_unit": "mph"
+        "wind_speed_unit": "mph",
+        "daily": "precipitation_sum",
+        "past_days": 30,
     }
 
     try:
@@ -85,11 +89,23 @@ async def fetch_openmeteo_weather(lat: float, lon: float) -> Optional[Dict[str, 
             data = resp.json()
             current = data.get("current", {})
 
+            # Daily precipitation (mm) for today plus the past 30 days. The last
+            # 30 entries are today + 29 prior days, matching the Lamar rule's
+            # "30-day antecedent precipitation" window; missing days count as 0.
+            daily = data.get("daily", {})
+            precip_mm = daily.get("precipitation_sum")
+            precip_30d_in = None
+            if precip_mm:
+                total_mm = sum(v for v in precip_mm[-30:] if v is not None)
+                precip_30d_in = round(total_mm / 25.4, 2)
+
             return {
                 "temperature_f": current.get("temperature_2m"),
                 "wind_speed_mph": current.get("wind_speed_10m"),
                 "wind_direction_deg": current.get("wind_direction_10m"),
-                "boundary_layer_height_m": current.get("boundary_layer_height")
+                "wind_gust_mph": current.get("wind_gusts_10m"),
+                "boundary_layer_height_m": current.get("boundary_layer_height"),
+                "precip_30d_in": precip_30d_in,
             }
     except Exception as e:
         print(f"[Open-Meteo Weather Error]: {e}")
