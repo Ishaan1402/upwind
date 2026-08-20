@@ -1265,7 +1265,7 @@ def _external_dust_signals(**overrides):
     })
     base.append({
         "id": "metar_dust",
-        "label": "Nearby Airport Blowing Dust (METAR)",
+        "label": "METAR Dust Report",
         "status": "absent",
         "station": None,
         "phenomenon": None,
@@ -1306,7 +1306,7 @@ def test_nws_dust_alert_present_confirms_dust_ranks_first():
 
 @pytest.mark.honesty
 def test_metar_dust_present_confirms_dust_ranks_first():
-    """Gap 3b positive (METAR): a nearby airport METAR reporting blowing dust
+    """Gap 3b positive (METAR): a nearby METAR station reporting blowing dust
     CONFIRMS windblown dust at high/>=90 and ranks it first over smoke."""
     observation = {"aqi": 140, "primary_pollutant": "PM10", "category": "Unhealthy for Sensitive Groups"}
     signals = _external_dust_signals(
@@ -1325,7 +1325,7 @@ def test_metar_dust_present_confirms_dust_ranks_first():
     assert dust_h["confidence"] == "high"
     assert dust_h["score"] >= 90
     assert hypotheses[0]["id"] == "windblown_dust"
-    assert any("A nearby airport reported BLDU (blowing dust)" in s for s in dust_h["support"])
+    assert any("A nearby METAR station reported BLDU (blowing dust)" in s for s in dust_h["support"])
     assert any("An official/observed dust signal confirms dust over smoke" in a for a in smoke_h["against"])
 
 

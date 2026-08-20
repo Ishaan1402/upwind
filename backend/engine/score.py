@@ -522,7 +522,7 @@ def score_hypotheses(
 
     # -----------------------------------------------------------------------
     # Official/observed dust confirmation (Gap 3b): an NWS dust warning or a
-    # nearby airport METAR reporting blowing dust is a high-precision,
+    # nearby METAR station reporting blowing dust is a high-precision,
     # low-recall confirmation. When present on a dust-suspect (PM10-primary or
     # coarse-dominated) elevated-PM day, it forces windblown dust high/>=90
     # over any smoke evidence. Absence is NOT evidence: absent/unavailable
@@ -542,7 +542,7 @@ def score_hypotheses(
         if metar_dust.get("status") == "present":
             phenomenon = metar_dust.get("phenomenon") or "BLDU"
             dust_support.append(
-                f"A nearby airport reported {phenomenon} (blowing dust)"
+                f"A nearby METAR station reported {phenomenon} (blowing dust)"
             )
         dust_score = max(dust_score, 90)
         dust_conf = "high"

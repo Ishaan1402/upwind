@@ -28,7 +28,7 @@ TOOL_STEPS = {
     "hms_scan": "Checking NOAA smoke-plume analysis overhead",
     "wfigs_scan": "Checking federal wildfire incident registry",
     "nws_dust_scan": "Checking NWS dust warnings/advisories",
-    "metar_dust_scan": "Checking nearby airport METARs for blowing dust",
+    "metar_dust_scan": "Checking nearby METAR stations for dust",
     "firms_scan": "Scanning NASA FIRMS thermal hotspot clusters upwind",
     "web_search": "Searching public news & active incident feeds (Web Search)",
     "openaq_monitors": "Reading local monitor concentrations (OpenAQ)",
@@ -487,10 +487,10 @@ def build_evidence_signals(
         "details": nws_res.get("details", ""),
     })
 
-    # Signal: Nearby Airport Blowing Dust (METAR) (one-sided dust confirmation)
+    # Signal: METAR Dust Report (one-sided dust confirmation)
     signals.append({
         "id": "metar_dust",
-        "label": "Nearby Airport Blowing Dust (METAR)",
+        "label": "METAR Dust Report",
         "status": metar_res.get("status", "unavailable"),
         "station": metar_res.get("station"),
         "phenomenon": metar_res.get("phenomenon"),
