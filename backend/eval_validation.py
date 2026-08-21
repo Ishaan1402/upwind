@@ -195,7 +195,7 @@ async def run_validation() -> Dict[str, Any]:
     predicted: List[str] = []
     for case in cases:
         verdict = await judge_narrative(case["evidence"], case["narrative"])
-        judge_value = verdict.get("verdict")
+        judge_value = verdict.verdict
         gold_value = case["gold_verdict"]
         agreement = (
             judge_value == gold_value
@@ -209,8 +209,8 @@ async def run_validation() -> Dict[str, Any]:
             "gold_verdict": gold_value,
             "judge_verdict": judge_value,
             "agreement": agreement,
-            "judge_model": verdict.get("judge_model"),
-            "reasoning": verdict.get("reasoning"),
+            "judge_model": verdict.judge_model,
+            "reasoning": verdict.reasoning,
         })
 
     judged_pairs = [

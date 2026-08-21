@@ -7,6 +7,8 @@ from unittest.mock import AsyncMock, patch
 from backend import db as db_module
 from backend import eval as eval_module
 from backend import llm_judge as judge_module
+from backend.llm import BriefingResult
+from backend.llm_judge import JudgeResult
 
 
 def test_rule_judge_detects_jargon_units_headers():
@@ -91,14 +93,12 @@ def test_export_fails_csv(monkeypatch, tmp_path):
 
 
 def test_corpus_run_shape():
-    verdict = {
-        "verdict": "pass",
-        "judge_model": "model-a",
-        "reasoning": "ok",
-        "hallucinations": [],
-        "leaked_jargon": [],
-    }
-    with patch("backend.eval.generate_narrative_briefing", new_callable=AsyncMock, return_value="narrative"), \
+    verdict = JudgeResult(
+        verdict="pass",
+        judge_model="model-a",
+        reasoning="ok",
+    )
+    with patch("backend.eval.generate_narrative_briefing", new_callable=AsyncMock, return_value=BriefingResult(narrative="narrative")), \
          patch("backend.eval.judge_narrative", new_callable=AsyncMock, return_value=verdict):
         results = asyncio.run(eval_module.run_corpus())
 
@@ -114,12 +114,12 @@ def test_corpus_run_shape():
 def test_judge_compare_reports_agreement():
     async def fake_judge(evidence, narrative):
         current = judge_module.DEFAULT_JUDGE_MODEL
-        return {
-            "verdict": "pass" if current == "alt-model" else "fail",
-            "judge_model": current,
-        }
+        return JudgeResult(
+            verdict="pass" if current == "alt-model" else "fail",
+            judge_model=current,
+        )
 
-    with patch("backend.eval.generate_narrative_briefing", new_callable=AsyncMock, return_value="n"), \
+    with patch("backend.eval.generate_narrative_briefing", new_callable=AsyncMock, return_value=BriefingResult(narrative="n")), \
          patch("backend.eval.judge_narrative", side_effect=fake_judge):
         results = asyncio.run(eval_module.run_judge_compare("alt-model"))
 
@@ -143,5 +143,5 @@ def test_judge_verdict_includes_model():
          patch("backend.llm_judge.GROQ_API_KEY", "test-key"):
         verdict = asyncio.run(judge_module.judge_narrative({}, "narrative"))
 
-    assert verdict["verdict"] == "pass"
-    assert verdict["judge_model"] == judge_module.DEFAULT_JUDGE_MODEL
+    assert verdict.verdict == "pass"
+    assert verdict.judge_model == judge_module.DEFAULT_JUDGE_MODEL

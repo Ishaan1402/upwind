@@ -47,6 +47,44 @@ def test_export_then_validate(tmp_path, monkeypatch):
     assert result["exact_agreement"] == round(1 / 3, 4)
     assert result["confusion"]["gold_pass_judge_pass"] == 1
     assert result["confusion"]["gold_fail_judge_fail"] == 0
+    # One pass/pass, one pass/fail, one fail/pass -> precision/recall 0.5 for
+    # pass, 0.0 for fail; fail F1 (0/0) and macro-F1 are undefined -> None.
+    assert result["precision"] == {"pass": 0.5, "fail": 0.0}
+    assert result["recall"] == {"pass": 0.5, "fail": 0.0}
+    assert result["f1"] == {"pass": 0.5, "fail": None}
+    assert result["macro_f1"] is None
+
+
+def test_validation_reports_defined_metrics_on_full_agreement(tmp_path, monkeypatch):
+    db_path = tmp_path / "cache.db"
+    monkeypatch.setattr(db_module, "DB_PATH", str(db_path))
+    monkeypatch.setattr(labels_module, "DB_PATH", str(db_path))
+    _seed_cache(db_path)
+
+    out_csv = tmp_path / "labels.csv"
+    labels_module.export_rows(str(db_path), str(out_csv), limit=10)
+    rows = list(csv.DictReader(open(out_csv)))
+    by_key = {r["cache_key"]: r for r in rows}
+    by_key["why_1"]["human_label"] = "pass"
+    by_key["why_2"]["human_label"] = "fail"
+    by_key["why_3"]["human_label"] = "pass"
+    with open(out_csv, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=rows[0].keys())
+        writer.writeheader()
+        writer.writerows(rows)
+
+    result = labels_module.validate_labels(str(out_csv), str(db_path))
+    assert result["exact_agreement"] == 1.0
+    assert result["confusion"] == {
+        "gold_pass_judge_pass": 2,
+        "gold_pass_judge_fail": 0,
+        "gold_fail_judge_pass": 0,
+        "gold_fail_judge_fail": 1,
+    }
+    assert result["precision"] == {"pass": 1.0, "fail": 1.0}
+    assert result["recall"] == {"pass": 1.0, "fail": 1.0}
+    assert result["f1"] == {"pass": 1.0, "fail": 1.0}
+    assert result["macro_f1"] == 1.0
 
 
 def test_skip_rows_are_excluded(tmp_path, monkeypatch):

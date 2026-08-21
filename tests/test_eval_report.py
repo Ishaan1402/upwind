@@ -87,7 +87,69 @@ def test_render_dashboard_public_hides_narratives_and_cache_keys():
     assert "secret-key" not in page
     assert "hidden on public page" in page
     assert "Judge validation" in page
-    assert "Metrics" in page
+    assert "Scale" in page
+    assert "Reliability" in page
+
+
+def test_render_label_validation_shows_in_live_quality():
+    page = render_dashboard(
+        metrics={"quality": {"judge_pass_rate": 0.8}, "why": {}},
+        label_validation={
+            "label_source": "human",
+            "exact_agreement": 0.91,
+            "cohens_kappa": 0.83,
+            "macro_f1": 0.76,
+            "judged_cases": 46,
+            "precision": {"pass": 0.9, "fail": 0.6},
+            "recall": {"pass": 0.8, "fail": 0.7},
+            "f1": {"pass": 0.85, "fail": 0.65},
+            "results": [],
+        },
+    )
+    assert "Judge agreement vs human labels" in page
+    assert "91.0%" in page
+    assert "0.83" in page
+    assert "76.0%" in page  # macro F1 card
+    assert "precision" in page
+    assert "90.0%" in page  # pass precision
+    assert "70.0%" in page  # fail recall
+    # Deterministic validation (no human label_source) must NOT leak into the
+    # live-quality agreement card (it stays in the benchmark section instead).
+    page2 = render_dashboard(
+        metrics={"quality": {}},
+        validation={"exact_agreement": 0.7, "cohens_kappa": 0.5, "judged_cases": 7, "results": []},
+    )
+    assert "awaiting agent-labeled samples" in page2
+    assert "judge vs label agreement" not in page2
+    assert "70.0%" in page2  # present only inside the offline benchmark section
+
+
+def test_render_bakes_workflow_statuses():
+    page = render_dashboard(
+        workflows=[
+            {"file": "ci.yml", "label": "CI", "status": "success", "run_number": 42,
+             "branch": "main", "sha": "abc1234", "html_url": "https://example.com/42",
+             "created_at": "2026-08-20T00:00:00Z"},
+        ]
+    )
+    # Baked statuses ride in the page data and are rendered by renderBaked,
+    # never fetched from the unauthenticated GitHub API.
+    assert '"workflow_runs"' in page
+    assert '"success"' in page
+    assert '"run_number":42' in page
+    assert "renderBaked" in page
+    # Nav/content placeholders are always substituted, not leaked into HTML.
+    assert "__NAV__" not in page
+    assert "__CONTENT__" not in page
+    assert "__GENERATED_AT__" not in page
+    assert 'href="#overview"' in page
+    # The client-side GitHub fallback is gone entirely; empty workflow_runs
+    # keeps the "loading latest run…" placeholder instead of calling the API.
+    page2 = render_dashboard()
+    assert "loading latest run…" in page2
+    assert "loadRun" not in page2
+    assert "RUNS_URL" not in page2
+    assert "fetch(" not in page2
 
 
 def test_render_dashboard_empty_inputs_still_build():

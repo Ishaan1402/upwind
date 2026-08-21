@@ -21,7 +21,7 @@ import csv
 import json
 import sqlite3
 from datetime import datetime, timezone
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from backend.db import DB_PATH, init_db
 from backend.eval_validation import _cohens_kappa
@@ -76,6 +76,46 @@ def export_rows(db_path: str, out_path: str, limit: int) -> int:
     return len(rows)
 
 
+def _binary_metrics(confusion: Dict[str, int]) -> Dict[str, Any]:
+    """Per-class precision/recall/F1 and macro-F1 derived from confusion counts.
+
+    Treats human labels as gold and judge verdicts as predicted, with ``pass``
+    and ``fail`` as the two binary classes. Any metric whose denominator is
+    zero (e.g. a class with no gold or no predicted instances) is None.
+    """
+    gp_jp = confusion["gold_pass_judge_pass"]  # gold pass, predicted pass
+    gp_jf = confusion["gold_pass_judge_fail"]  # gold pass, predicted fail
+    gf_jp = confusion["gold_fail_judge_pass"]  # gold fail, predicted pass
+    gf_jf = confusion["gold_fail_judge_fail"]  # gold fail, predicted fail
+
+    def _ratio(num: int, denom: int) -> Optional[float]:
+        return round(num / denom, 4) if denom else None
+
+    def _f1(precision: Optional[float], recall: Optional[float]) -> Optional[float]:
+        if precision is None or recall is None or (precision + recall) == 0:
+            return None
+        return round(2 * precision * recall / (precision + recall), 4)
+
+    precision = {
+        "pass": _ratio(gp_jp, gp_jp + gf_jp),
+        "fail": _ratio(gf_jf, gf_jf + gp_jf),
+    }
+    recall = {
+        "pass": _ratio(gp_jp, gp_jp + gp_jf),
+        "fail": _ratio(gf_jf, gf_jf + gf_jp),
+    }
+    f1 = {
+        "pass": _f1(precision["pass"], recall["pass"]),
+        "fail": _f1(precision["fail"], recall["fail"]),
+    }
+    macro_f1 = (
+        round((f1["pass"] + f1["fail"]) / 2, 4)
+        if f1["pass"] is not None and f1["fail"] is not None
+        else None
+    )
+    return {"precision": precision, "recall": recall, "f1": f1, "macro_f1": macro_f1}
+
+
 def validate_labels(labels_path: str, db_path: str) -> Dict[str, Any]:
     """Compare human labels against cached judge verdicts."""
     judge_by_key = {r["cache_key"]: r for r in _load_cached_rows(db_path, 100000)}
@@ -125,6 +165,7 @@ def validate_labels(labels_path: str, db_path: str) -> Dict[str, Any]:
         ),
     }
 
+    metrics = _binary_metrics(confusion)
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "label_source": "human",
@@ -133,6 +174,10 @@ def validate_labels(labels_path: str, db_path: str) -> Dict[str, Any]:
         "exact_agreement": exact_agreement,
         "cohens_kappa": _cohens_kappa(human_values, judge_values),
         "confusion": confusion,
+        "precision": metrics["precision"],
+        "recall": metrics["recall"],
+        "f1": metrics["f1"],
+        "macro_f1": metrics["macro_f1"],
         "results": results,
     }
 

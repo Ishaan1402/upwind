@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Upwind — evidence & observability</title>
+<style>
+:root { color-scheme: dark; }
+* { box-sizing: border-box; }
+body { margin: 0; background: #0d1117; color: #e6edf3; font: 14px/1.5 system-ui, -apple-system, sans-serif; }
+.layout { display: flex; gap: 32px; max-width: 1180px; margin: 0 auto; padding: 28px 20px 64px; }
+aside { width: 190px; flex: 0 0 190px; position: sticky; top: 24px; align-self: flex-start; }
+aside .brand { margin: 0 0 18px; }
+aside .brand h1 { margin: 0; font-size: 18px; letter-spacing: .02em; }
+aside .brand p { margin: 2px 0 0; color: #8b949e; font-size: 12px; }
+aside nav { display: flex; flex-direction: column; }
+aside nav a {
+  display: block; padding: 7px 12px; color: #8b949e; text-decoration: none;
+  border-left: 2px solid transparent; border-radius: 4px; font-size: 13.5px;
+}
+aside nav a:hover { color: #e6edf3; background: #161b22; }
+aside nav a.active { color: #e6edf3; border-left-color: #58a6ff; background: #161b22; }
+aside footer { margin-top: 28px; color: #484f58; font-size: 11.5px; }
+.content { flex: 1; min-width: 0; }
+section { scroll-margin-top: 20px; }
+h2 { margin: 0 0 14px; font-size: 19px; border-bottom: 1px solid #21262d; padding-bottom: 10px; }
+h3 { margin: 26px 0 8px; font-size: 14px; color: #c9d1d9; }
+.stats { display: flex; flex-wrap: wrap; gap: 8px 28px; margin: 10px 0 4px; }
+.stat .num { font-size: 24px; font-weight: 700; display: block; }
+.stat .lbl { color: #8b949e; font-size: 12px; }
+table { width: 100%; border-collapse: collapse; margin: 8px 0 20px; }
+th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid #21262d; vertical-align: top; }
+th { color: #8b949e; font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
+td { font-size: 13px; }
+pre { background: #0d1117; border: 1px solid #30363d; border-radius: 6px; padding: 10px; overflow: auto; white-space: pre-wrap; }
+.badge { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 12px; font-weight: 600; }
+.badge.ok { background: rgba(63,185,80,.15); color: #3fb950; }
+.badge.bad { background: rgba(248,81,73,.15); color: #f85149; }
+.badge.warn { background: rgba(210,153,34,.15); color: #d29922; }
+.badge.mute { background: rgba(139,148,158,.15); color: #8b949e; }
+.bench-note { background: #161b22; border-left: 3px solid #d29922; padding: 10px 14px; margin: 12px 0; border-radius: 0 6px 6px 0; color: #c9d1d9; }
+.empty { color: #8b949e; }
+.muted { color: #8b949e; }
+.ok-line { color: #3fb950; }
+details summary { cursor: pointer; color: #58a6ff; }
+a { color: #58a6ff; }
+a:hover { text-decoration: underline; }
+.card { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 14px; }
+.cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 12px; margin: 14px 0; }
+.wf { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.wf strong { min-width: 90px; }
+.wf-meta { color: #8b949e; font-size: 12px; }
+.dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
+.dot.ok { background: #3fb950; }
+.dot.bad { background: #f85149; }
+.dot.warn { background: #d29922; }
+.dot.mute { background: #484f58; }
+@media (max-width: 760px) {
+  .layout { flex-direction: column; gap: 18px; }
+  aside { width: 100%; position: static; }
+  aside nav { flex-direction: row; flex-wrap: wrap; }
+  aside nav a { border-left: none; border-bottom: 2px solid transparent; }
+  aside nav a.active { border-bottom-color: #58a6ff; }
+}
+</style>
+</head>
+<body>
+<div class="layout">
+<aside>
+  <div class="brand"><h1>Upwind</h1><p>evidence &amp; observability</p></div>
+  <nav>__NAV__</nav>
+  <footer>Updated <strong>__GENERATED_AT__</strong>.<br>Rendered nightly from production telemetry.</footer>
+</aside>
+<div class="content">
+__CONTENT__
+<p class="muted" style="margin-top:48px">
+  All observability sections are measured from live production traffic (request, explanation,
+  signal, and user-event tables in the VM database). The Offline benchmark section is a
+  research benchmark — not live truth.
+</p>
+</div>
+</div>
+<script>
+const DATA = __DATA_JSON__;
+
+function renderBaked(run) {
+  const card = document.getElementById('wf-' + (run.file || '').replace('.', '-'));
+  if (!card) return;
+  const meta = card.querySelector('.wf-meta');
+  const dot = card.querySelector('.dot');
+  const status = run.status || 'unknown';
+  dot.className = 'dot ' + (status === 'success' ? 'ok' : status === 'failure' ? 'bad' : 'warn');
+  const when = run.created_at ? new Date(run.created_at).toLocaleString() : '';
+  meta.innerHTML = (run.html_url
+    ? '<a href="' + run.html_url + '" target="_blank" rel="noopener">#' + (run.run_number || '?') + '</a>'
+    : '#' + (run.run_number || '?')) +
+    ' · ' + (run.branch || '') + ' · ' + (run.sha || '') +
+    '<br>' + status + (when ? ' · ' + when : '');
+}
+
+if (DATA.workflow_runs && DATA.workflow_runs.length) {
+  DATA.workflow_runs.forEach(renderBaked);
+}
+
+// Scrollspy: highlight the section currently in view.
+const links = Array.prototype.slice.call(document.querySelectorAll('aside nav a'));
+const sections = links.map(function (a) { return document.querySelector(a.getAttribute('href')); }).filter(Boolean);
+function onScroll() {
+  let current = sections[0];
+  for (const s of sections) { if (window.scrollY >= s.offsetTop - 80) current = s; }
+  links.forEach(function (a) { a.classList.toggle('active', a.getAttribute('href') === '#' + current.id); });
+}
+window.addEventListener('scroll', onScroll, { passive: true });
+onScroll();
+</script>
+</body>
+</html>
