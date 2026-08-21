@@ -1330,6 +1330,31 @@ def test_metar_dust_present_confirms_dust_ranks_first():
 
 
 @pytest.mark.honesty
+def test_nws_dust_confirmation_beats_max_smoke_score():
+    """Tie-breaker: when verified fire evidence would pin wildfire_smoke at the
+    ladder ceiling (90) AND an NWS dust warning confirms dust on the same
+    PM10-primary elevated day, dust must still rank first (pinned to 95) rather
+    than losing the stable-sort tie to the earlier-inserted smoke hypothesis."""
+    observation = {"aqi": 140, "primary_pollutant": "PM10", "category": "Unhealthy for Sensitive Groups"}
+    signals = _external_dust_signals(
+        firms_upwind={"status": "present", "count": 3, "alignment": "upwind",
+                      "nearest": {"distance_miles": 45.0, "bearing": "NW", "distance_km": 72.4}},
+        nws_dust_alert={"status": "present", "event": "Dust Storm Warning",
+                        "headline": "Dust Storm Warning issued for the El Paso area",
+                        "severity": "Severe"},
+    )
+    hypotheses, _ = score_hypotheses(observation, signals)
+    smoke_h = next(h for h in hypotheses if h["id"] == "wildfire_smoke")
+    dust_h = next(h for h in hypotheses if h["id"] == "windblown_dust")
+
+    # Sanity: the fire evidence alone would pin smoke at the 90 ceiling.
+    assert smoke_h["score"] == 90
+    assert dust_h["score"] == 95
+    assert dust_h["score"] > smoke_h["score"]
+    assert hypotheses[0]["id"] == "windblown_dust"
+
+
+@pytest.mark.honesty
 def test_dust_confirmation_absent_does_not_move_dust():
     """Gap 3b negative: absent NWS/METAR signals are NOT evidence - dust must
     be scored exactly as if the feeds were never queried (one-sided signals)."""

@@ -21,12 +21,12 @@ async def get_aqi(
     location_info = None
 
     if isinstance(lat, (float, int)) and isinstance(lon, (float, int)):
-        location_info = geocode_location(f"{float(lat):.6f},{float(lon):.6f}")
+        location_info = await asyncio.to_thread(geocode_location, f"{float(lat):.6f},{float(lon):.6f}")
     else:
         search_term = (zip if isinstance(zip, str) and zip.strip() else None) or \
                       (query if isinstance(query, str) and query.strip() else None) or \
                       "90210" # default Beverly Hills if blank
-        location_info = geocode_location(search_term)
+        location_info = await asyncio.to_thread(geocode_location, search_term)
 
     if not location_info:
         raise HTTPException(status_code=400, detail="Could not geocode location. Please provide a valid location or coordinates.")
