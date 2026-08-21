@@ -15,15 +15,20 @@ from backend.engine.signals import (
     create_trace_step,
 )
 from backend.engine.score import score_hypotheses
-from backend.llm import generate_narrative_briefing, generate_narrative_briefing_stream, generate_fallback_narrative
-from backend.llm_judge import judge_narrative
+from backend.llm import generate_narrative_briefing, generate_narrative_briefing_stream, generate_fallback_narrative, StreamMeta
+from backend.llm_judge import judge_narrative, JudgeResult
 from backend.db import get_cached_narrative, set_cached_narrative, update_cached_verdict
 from backend.config import (
     DEEPSEEK_API_KEY,
     ENFORCE_OBSERVATION_TOKENS,
     OBSERVATION_TOKEN_SECRET,
 )
-from backend.metrics import estimate_llm_cost, record_why
+from backend.metrics import (
+    estimate_llm_cost,
+    record_why,
+    record_signal_events,
+    update_why_verdict,
+)
 from backend.services.coverage import coverage_for_location
 from backend.observation_token import verify_observation_token
 
@@ -44,12 +49,20 @@ def _schedule_background(coro):
     task.add_done_callback(_background_tasks.discard)
     return task
 
-async def _async_judge_streamed_narrative(evidence_payload: Dict[str, Any], full_narrative: str, cache_key: str):
+async def _async_judge_streamed_narrative(evidence_payload: Dict[str, Any], full_narrative: str, cache_key: str, why_event_id: Optional[int] = None):
     """Post-hoc non-blocking evaluation of streamed narrative."""
     try:
         verdict = await judge_narrative(evidence_payload, full_narrative)
-        update_cached_verdict(cache_key, verdict)
-        if verdict.get("verdict") == "fail":
+        update_cached_verdict(cache_key, verdict.to_dict())
+        # Write the verdict + judge tokens back to the exact telemetry row so
+        # streamed traffic populates the live judge stats.
+        update_why_verdict(
+            why_event_id,
+            verdict.verdict,
+            verdict.judge_input_tokens or None,
+            verdict.judge_output_tokens or None,
+        )
+        if verdict.verdict == "fail":
             # Replace rejected narrative with safe fallback in cache
             fallback = generate_fallback_narrative(
                 evidence_payload["location"],
@@ -58,8 +71,8 @@ async def _async_judge_streamed_narrative(evidence_payload: Dict[str, Any], full
                 evidence_payload["hypotheses"],
                 evidence_payload["open_questions"],
             )
-            set_cached_narrative(cache_key, fallback, evidence_payload, verdict)
-            print(f"[LLM Judge Stream Warning]: Streamed narrative failed judge check ({verdict.get('reasoning')}). Hallucinations: {verdict.get('hallucinations')}, Jargon: {verdict.get('leaked_jargon')}")
+            set_cached_narrative(cache_key, fallback, evidence_payload, verdict.to_dict())
+            print(f"[LLM Judge Stream Warning]: Streamed narrative failed judge check ({verdict.reasoning}). Hallucinations: {verdict.hallucinations}, Jargon: {verdict.leaked_jargon}")
     except Exception as e:
         print(f"[LLM Judge Stream Error]: {e}")
 
@@ -110,12 +123,33 @@ async def get_why_explanation(req: WhyRequest):
     cached_narrative = get_cached_narrative(cache_key)
     cache_hit = cached_narrative is not None
     final_verdict = None
+    fallback_used = False
+    gatekeeper_retries = 0
+    llm_meta: Dict[str, Any] = {"input_tokens": 0, "output_tokens": 0, "fell_back": False}
+    judge_meta: Dict[str, Any] = {"judge_input_tokens": 0, "judge_output_tokens": 0}
+
+    async def _brief() -> str:
+        """Generate a briefing and fold real token usage/fallback into meta."""
+        result = await generate_narrative_briefing(
+            location, observation, signals, hypotheses, open_questions
+        )
+        if result.fell_back:
+            llm_meta["fell_back"] = True
+        llm_meta["input_tokens"] += result.input_tokens
+        llm_meta["output_tokens"] += result.output_tokens
+        return result.narrative
+
+    async def _judge(payload: Dict[str, Any], text: str) -> JudgeResult:
+        """Judge a narrative and fold real judge token usage into meta."""
+        verdict = await judge_narrative(payload, text)
+        judge_meta["judge_input_tokens"] += verdict.judge_input_tokens
+        judge_meta["judge_output_tokens"] += verdict.judge_output_tokens
+        return verdict
+
     if cached_narrative:
         narrative = cached_narrative
     else:
-        narrative = await generate_narrative_briefing(
-            location, observation, signals, hypotheses, open_questions
-        )
+        narrative = await _brief()
         evidence_payload = {
             "location": location,
             "observation": observation,
@@ -126,23 +160,25 @@ async def get_why_explanation(req: WhyRequest):
         }
 
         # Runtime Gatekeeper Evaluation
-        verdict = await judge_narrative(evidence_payload, narrative)
-        if verdict.get("verdict") == "fail":
-            print(f"[LLM Judge Gatekeeper Fail]: Retrying narrative generation... Reason: {verdict.get('reasoning')}")
-            narrative = await generate_narrative_briefing(
-                location, observation, signals, hypotheses, open_questions
-            )
+        verdict = await _judge(evidence_payload, narrative)
+        if verdict.verdict == "fail":
+            print(f"[LLM Judge Gatekeeper Fail]: Retrying narrative generation... Reason: {verdict.reasoning}")
+            gatekeeper_retries += 1
+            narrative = await _brief()
             evidence_payload["narrative"] = narrative
-            verdict = await judge_narrative(evidence_payload, narrative)
-            if verdict.get("verdict") == "fail":
-                print(f"[LLM Judge Gatekeeper Fail 2nd Time]: Falling back to deterministic narrative. Reason: {verdict.get('reasoning')}")
+            verdict = await _judge(evidence_payload, narrative)
+            if verdict.verdict == "fail":
+                print(f"[LLM Judge Gatekeeper Fail 2nd Time]: Falling back to deterministic narrative. Reason: {verdict.reasoning}")
                 narrative = generate_fallback_narrative(
                     location, observation, signals, hypotheses, open_questions
                 )
                 evidence_payload["narrative"] = narrative
+                fallback_used = True
 
-        set_cached_narrative(cache_key, narrative, evidence_payload, verdict)
-        final_verdict = verdict.get("verdict") if verdict else None
+        set_cached_narrative(cache_key, narrative, evidence_payload, verdict.to_dict())
+        final_verdict = verdict.verdict if verdict else None
+
+    fallback_used = fallback_used or bool(llm_meta.get("fell_back"))
 
     # Prepare map overlays if FIRMS hotspots present
     firms_sig = next((s for s in signals if s["id"] == "firms_upwind"), None)
@@ -151,6 +187,8 @@ async def get_why_explanation(req: WhyRequest):
         map_layers["firms_hotspots"] = firms_sig["hotspots"]
 
     llm_generated = (not cache_hit) and bool(DEEPSEEK_API_KEY)
+    record_signal_events("/api/why", execution_trace)
+    top_h = hypotheses[0] if hypotheses else None
     record_why(
         "/api/why",
         cache_hit=cache_hit,
@@ -158,6 +196,16 @@ async def get_why_explanation(req: WhyRequest):
         llm_cost_usd=estimate_llm_cost(narrative) if llm_generated else 0.0,
         judge_verdict=final_verdict,
         country_code=location.get("country_code"),
+        loc_key=loc_key,
+        total_ms=total_ms,
+        top_hypothesis=top_h.get("id") if top_h else None,
+        top_confidence=top_h.get("confidence") if top_h else None,
+        llm_input_tokens=llm_meta.get("input_tokens") or None,
+        llm_output_tokens=llm_meta.get("output_tokens") or None,
+        judge_input_tokens=judge_meta.get("judge_input_tokens") or None,
+        judge_output_tokens=judge_meta.get("judge_output_tokens") or None,
+        fallback_used=fallback_used,
+        gatekeeper_retries=gatekeeper_retries,
     )
 
     return {
@@ -204,7 +252,12 @@ async def stream_why_explanation(
         "country_code": country_code,
     }
 
-    if ENFORCE_OBSERVATION_TOKENS and aqi is not None:
+    if ENFORCE_OBSERVATION_TOKENS:
+        if aqi is None:
+            raise HTTPException(
+                status_code=400,
+                detail="observation_token is missing, expired, or does not match this observation.",
+            )
         client_observation = {
             "source": "AirNow",
             "aqi": aqi,
@@ -294,15 +347,40 @@ async def stream_why_explanation(
         # DeepSeek Briefing Token Streaming (Directly into narrative box)
         cached_narrative = get_cached_narrative(cache_key)
         full_narrative = ""
+        stream_meta = StreamMeta()
+        why_event_id: Optional[int] = None
+        evidence_payload: Optional[Dict[str, Any]] = None
+
+        def _record_stream() -> Optional[int]:
+            record_signal_events("/api/why/stream", execution_trace)
+            top_h = hypotheses[0] if hypotheses else None
+            return record_why(
+                "/api/why/stream",
+                cache_hit=cache_hit,
+                llm_generated=llm_generated,
+                llm_cost_usd=estimate_llm_cost(full_narrative) if llm_generated else 0.0,
+                judge_verdict=None,  # async judge writes this back via why_event_id
+                country_code=location.get("country_code"),
+                loc_key=loc_key,
+                total_ms=total_ms,
+                top_hypothesis=top_h.get("id") if top_h else None,
+                top_confidence=top_h.get("confidence") if top_h else None,
+                # Streamed responses don't surface usage; estimate both sides so
+                # the prompt-token cost is not silently dropped (chars≈tokens/4).
+                llm_input_tokens=max(1, len(json.dumps(evidence_payload)) // 4) if llm_generated else None,
+                llm_output_tokens=max(1, len(full_narrative) // 4) if llm_generated else None,
+                fallback_used=stream_meta.fell_back,
+            )
 
         if cached_narrative:
             cache_hit = True
             full_narrative = cached_narrative
             # Return cached narrative immediately without word streaming
             yield f"event: llm_token\ndata: {json.dumps({'token': cached_narrative})}\n\n"
+            _record_stream()
         else:
             llm_generated = bool(DEEPSEEK_API_KEY)
-            async for token in generate_narrative_briefing_stream(location, observation, signals, hypotheses, open_questions):
+            async for token in generate_narrative_briefing_stream(location, observation, signals, hypotheses, open_questions, stream_meta=stream_meta):
                 full_narrative += token
                 yield f"event: llm_token\ndata: {json.dumps({'token': token})}\n\n"
             
@@ -315,17 +393,11 @@ async def stream_why_explanation(
                 "narrative": full_narrative
             }
             set_cached_narrative(cache_key, full_narrative, evidence_payload)
-            # Run non-blocking narrative judge check in background
-            _schedule_background(_async_judge_streamed_narrative(evidence_payload, full_narrative, cache_key))
+            why_event_id = _record_stream()
+            # Run non-blocking narrative judge check in background; it writes
+            # the verdict back to the why_events row captured above.
+            _schedule_background(_async_judge_streamed_narrative(evidence_payload, full_narrative, cache_key, why_event_id))
 
-        record_why(
-            "/api/why/stream",
-            cache_hit=cache_hit,
-            llm_generated=llm_generated,
-            llm_cost_usd=estimate_llm_cost(full_narrative) if llm_generated else 0.0,
-            judge_verdict=None,
-            country_code=location.get("country_code"),
-        )
         yield f"event: complete\ndata: {json.dumps({'narrative': full_narrative, 'execution_trace': execution_trace, 'coverage': coverage_for_location(location, observation)})}\n\n"
 
     return StreamingResponse(sse_event_generator(), media_type="text/event-stream")

@@ -1,6 +1,30 @@
 import json
-from typing import Dict, Any, List, AsyncGenerator
+from dataclasses import dataclass
+from typing import Dict, Any, List, AsyncGenerator, Optional
 from backend.config import DEEPSEEK_API_KEY
+
+
+@dataclass
+class BriefingResult:
+    """Structured result of a briefing generation.
+
+    Carries the narrative plus real token usage from the API response and a
+    ``fell_back`` flag set when the deterministic fallback was used.
+    """
+    narrative: str
+    input_tokens: int = 0
+    output_tokens: int = 0
+    fell_back: bool = False
+
+
+@dataclass
+class StreamMeta:
+    """Out-param for streamed briefings.
+
+    A stream yields tokens, so it cannot return a value alongside them; this
+    small typed out-param is unavoidable for recording the ``fell_back`` flag.
+    """
+    fell_back: bool = False
 
 SYSTEM_PROMPT = """You are a friendly, engaging air quality expert explaining air pollution evidence to an everyday user.
 
@@ -73,10 +97,17 @@ async def generate_narrative_briefing(
     observation: Dict[str, Any],
     signals: List[Dict[str, Any]],
     hypotheses: List[Dict[str, Any]],
-    open_questions: List[str]
-) -> str:
+    open_questions: List[str],
+) -> BriefingResult:
+    """Generate a briefing and return a ``BriefingResult`` carrying the
+    narrative, real token usage from the API response, and a ``fell_back``
+    flag when the deterministic fallback was used — lets the caller record
+    honest cost without mutating an out-param."""
     if not DEEPSEEK_API_KEY:
-        return generate_fallback_narrative(location, observation, signals, hypotheses, open_questions)
+        return BriefingResult(
+            narrative=generate_fallback_narrative(location, observation, signals, hypotheses, open_questions),
+            fell_back=True,
+        )
 
     evidence_payload = {
         "location": location,
@@ -100,27 +131,49 @@ async def generate_narrative_briefing(
             max_tokens=280,
             temperature=0.4
         )
+        usage = getattr(response, "usage", None)
+        input_tokens = int(getattr(usage, "prompt_tokens", 0) or 0) if usage is not None else 0
+        output_tokens = int(getattr(usage, "completion_tokens", 0) or 0) if usage is not None else 0
         narrative = response.choices[0].message.content.strip()
         if narrative.startswith("**Briefing") or narrative.startswith("#"):
             lines = narrative.split("\n")
             narrative = "\n".join([l for l in lines if not l.startswith("**Briefing") and not l.startswith("#")]).strip()
-        return narrative if narrative else generate_fallback_narrative(location, observation, signals, hypotheses, open_questions)
+        if not narrative:
+            return BriefingResult(
+                narrative=generate_fallback_narrative(location, observation, signals, hypotheses, open_questions),
+                fell_back=True,
+            )
+        return BriefingResult(
+            narrative=narrative,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+        )
     except Exception as e:
         print(f"[LLM Generation Warning]: {e}", flush=True)
-        return generate_fallback_narrative(location, observation, signals, hypotheses, open_questions)
+        return BriefingResult(
+            narrative=generate_fallback_narrative(location, observation, signals, hypotheses, open_questions),
+            fell_back=True,
+        )
 
 async def generate_narrative_briefing_stream(
     location: Dict[str, Any],
     observation: Dict[str, Any],
     signals: List[Dict[str, Any]],
     hypotheses: List[Dict[str, Any]],
-    open_questions: List[str]
+    open_questions: List[str],
+    stream_meta: Optional[StreamMeta] = None,
 ) -> AsyncGenerator[str, None]:
     """
     Stream narrative briefing tokens in real-time from DeepSeek API (stream=True).
-    Yields string tokens directly.
+    Yields string tokens directly. ``stream_meta`` (optional ``StreamMeta``
+    out-param) has its ``fell_back`` flag set when the deterministic fallback
+    was used; token counts for streams are estimated by the caller (chars/4)
+    since usage is not reliably surfaced. Note: a stream cannot return a value
+    alongside the yielded tokens, so the small typed out-param is unavoidable.
     """
     if not DEEPSEEK_API_KEY:
+        if stream_meta is not None:
+            stream_meta.fell_back = True
         fallback = generate_fallback_narrative(location, observation, signals, hypotheses, open_questions)
         words = fallback.split(" ")
         for w in words:
@@ -135,6 +188,7 @@ async def generate_narrative_briefing_stream(
         "open_questions": open_questions
     }
 
+    emitted_any = False
     try:
         from openai import AsyncOpenAI
         client = AsyncOpenAI(base_url="https://api.deepseek.com", api_key=DEEPSEEK_API_KEY)
@@ -153,9 +207,16 @@ async def generate_narrative_briefing_stream(
 
         async for chunk in stream_response:
             if chunk.choices and chunk.choices[0].delta and chunk.choices[0].delta.content:
+                emitted_any = True
                 yield chunk.choices[0].delta.content
     except Exception as e:
         print(f"[LLM Stream Warning]: {e}", flush=True)
+        if emitted_any:
+            # A fallback can't be appended to a partially-streamed narrative
+            # without corrupting it; end the stream cleanly instead.
+            return
+        if stream_meta is not None:
+            stream_meta.fell_back = True
         fallback = generate_fallback_narrative(location, observation, signals, hypotheses, open_questions)
         for w in fallback.split(" "):
             yield w + " "

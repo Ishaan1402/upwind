@@ -101,9 +101,10 @@ async def fetch_zip_briefing(zip_code: str, use_cache: bool = True) -> Dict[str,
         narrative = get_cached_narrative(cache_key)
 
     if not narrative:
-        narrative = await generate_narrative_briefing(
+        result = await generate_narrative_briefing(
             location, observation, signals, hypotheses, open_questions
         )
+        narrative = result.narrative
         if use_cache:
             set_cached_narrative(cache_key, narrative, {
                 "location": location,
@@ -281,7 +282,7 @@ async def main_async():
                     "narrative": res["narrative"]
                 }
                 verdict = await judge_narrative(payload, res["narrative"])
-                res["judge_verdict"] = verdict
+                res["judge_verdict"] = verdict.to_dict()
 
     # Render output based on selected mode
     if args.json:
