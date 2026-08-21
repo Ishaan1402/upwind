@@ -1,3 +1,4 @@
+from datetime import datetime, timezone
 from typing import Dict, Any, List, Optional
 import httpx
 
@@ -44,6 +45,21 @@ def _parse_optional_bool(value: Any) -> bool:
     if value is None or value == "":
         return False
     return str(value).strip().lower() in ("true", "1", "yes")
+
+
+def _epoch_ms_to_utc(value: Any) -> Optional[datetime]:
+    """ArcGIS epoch-millisecond timestamp (e.g. ModifiedOnDateTime_dt) to an
+    aware UTC datetime; None when missing or unparseable."""
+    if value is None or value == "":
+        return None
+    try:
+        ms = float(value)
+    except (TypeError, ValueError):
+        return None
+    try:
+        return datetime.fromtimestamp(ms / 1000.0, tz=timezone.utc)
+    except (ValueError, OverflowError, OSError):
+        return None
 
 
 def _complex_group_key(incident: Dict[str, Any]) -> Optional[str]:
@@ -257,7 +273,17 @@ async def fetch_wfigs_incident(
                 alignment = "upwind" if top["is_upwind"] else "nearby"
                 size_txt = f"{top['size_acres']:,.0f} acres" if top["size_acres"] is not None else "size unknown"
                 cont_txt = f"{top['percent_contained']:.0f}% contained" if top["percent_contained"] is not None else "containment unknown"
-                return {
+                # Most recent incident timestamp (last-modified, else discovery)
+                # among the matched incidents, used as the feed's as_of.
+                incident_times = []
+                for incident in incidents:
+                    t = _epoch_ms_to_utc(incident.get("modified_ms"))
+                    if t is None:
+                        t = _epoch_ms_to_utc(incident.get("discovery_ms"))
+                    if t is not None:
+                        incident_times.append(t)
+                as_of = max(incident_times).isoformat() if incident_times else None
+                result = {
                     "status": "present",
                     "incident": top,
                     "count": len(incidents),
@@ -269,6 +295,9 @@ async def fetch_wfigs_incident(
                         f"{top['distance_miles']} mi {top['bearing']}"
                     ),
                 }
+                if as_of is not None:
+                    result["as_of"] = as_of
+                return result
             except Exception:
                 continue
 

@@ -69,7 +69,6 @@ def verify_observation_token(
         if int(body.get("exp", 0)) < int(time.time()):
             return False
         expected_payload = _payload(location, observation, int(body.get("exp", 0)))
-        expected_payload["exp"] = int(body.get("exp", 0))
         return body == expected_payload
     except Exception:
         return False

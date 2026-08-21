@@ -7,6 +7,22 @@ from backend.db import get_cached_geocode, set_cached_geocode
 _nom_geocodes = Nominatim(user_agent="upwind-aqi-why")
 _nomi_us = pgeocode.Nominatim('us')
 
+
+def _normalize_us_zip(raw: Optional[str]) -> Optional[str]:
+    """Coerce a raw postal string to a 5-digit US ZIP, or None if it isn't one.
+
+    Handles ZIP+4 ("97028-1234"), 9-digit ("970281234"), and stray formatting.
+    Returns None for empty, foreign, or otherwise non-5-digit values so callers
+    never feed a non-US postcode to the Census ZCTA endpoint.
+    """
+    if not raw:
+        return None
+    digits = re.sub(r"\D", "", raw)
+    if len(digits) < 5:
+        return None
+    return digits[:5]
+
+
 def geocode_location(query: str) -> Optional[Dict[str, Any]]:
     """
     Geocode an input query which can be:
@@ -25,11 +41,12 @@ def geocode_location(query: str) -> Optional[Dict[str, Any]]:
         lat = float(latlon_match.group(1))
         lon = float(latlon_match.group(2))
         reverse = _reverse_geocode(lat, lon)
+        is_us = str(reverse.get("country_code") or "").upper() == "US"
         return {
             "lat": lat,
             "lon": lon,
             "name": f"{lat:.4f}, {lon:.4f}",
-            "zip_code": None,
+            "zip_code": _normalize_us_zip(reverse.get("postcode")) if is_us else None,
             "state": reverse.get("state"),
             "city": reverse.get("city"),
             "country_code": reverse.get("country_code"),
@@ -62,16 +79,17 @@ def geocode_location(query: str) -> Optional[Dict[str, Any]]:
         return cached
 
     try:
-        location = _nom_geocodes.geocode(query, timeout=5)
+        location = _nom_geocodes.geocode(query, timeout=5, addressdetails=True)
         if location:
             address = (location.raw or {}).get("address") or {}
+            is_us = str(address.get("country_code") or "").upper() == "US"
             result = {
                 "lat": float(location.latitude),
                 "lon": float(location.longitude),
                 "name": location.address,
-                "zip_code": query if zip_match else None,
-                "state": None,
-                "city": None,
+                "zip_code": _normalize_us_zip(address.get("postcode")) if is_us else None,
+                "state": address.get("state"),
+                "city": address.get("city") or address.get("town") or address.get("village"),
                 "country_code": address.get("country_code"),
                 "country": address.get("country"),
             }
@@ -95,6 +113,7 @@ def _reverse_geocode(lat: float, lon: float) -> Dict[str, Any]:
         "city": None,
         "country_code": None,
         "country": None,
+        "postcode": None,
     }
     try:
         location = _nom_geocodes.reverse((lat, lon), timeout=5)
@@ -105,6 +124,7 @@ def _reverse_geocode(lat: float, lon: float) -> Dict[str, Any]:
                 "city": address.get("city") or address.get("town") or address.get("village"),
                 "country_code": address.get("country_code"),
                 "country": address.get("country"),
+                "postcode": address.get("postcode"),
             })
             set_cached_geocode(query_key, result)
     except Exception as e:

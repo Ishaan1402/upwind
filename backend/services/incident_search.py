@@ -143,9 +143,9 @@ def parse_rss_items_for_incident(rss_text: str, max_days: int = 7) -> Optional[s
             continue
 
         for m in INCIDENT_NAME_RE.findall(title):
-            candidate = m.strip()
-            if is_valid_incident_candidate(candidate):
-                return f"{candidate} Fire"
+            base_name = re.sub(r"\s+(Fire|Wildfire|Complex)$", "", m).strip()
+            if base_name and is_valid_incident_candidate(base_name):
+                return f"{base_name} Fire"
 
     return None
 
@@ -175,6 +175,8 @@ async def search_fire_incident_name(
         queries.append(f"{location_str} {wildland_terms} when:7d")
     if state:
         queries.append(f"{state} {wildland_terms} when:7d")
+    # A city-less state query duplicates the location_str fallback.
+    queries = list(dict.fromkeys(queries))
 
     async with httpx.AsyncClient(timeout=4.5) as client:
         for q in queries:

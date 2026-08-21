@@ -36,13 +36,16 @@ TOOL_STEPS = {
     "score_hypotheses": "Scoring attribution hypotheses (Evidence Matrix)"
 }
 
-def create_trace_step(step: str, duration_ms: float, status: str = "done") -> Dict[str, Any]:
-    return {
+def create_trace_step(step: str, duration_ms: float, status: str = "done", as_of: Optional[str] = None) -> Dict[str, Any]:
+    trace: Dict[str, Any] = {
         "step": step,
         "label": TOOL_STEPS.get(step, step),
         "duration_ms": max(0.1, round(duration_ms, 1)),
         "status": status
     }
+    if as_of is not None:
+        trace["as_of"] = as_of
+    return trace
 
 
 def _openaq_unavailable_signal(detail: str) -> Dict[str, Any]:
@@ -250,7 +253,8 @@ async def iter_evidence_signals(
         dur = (time.perf_counter() - t0) * 1000
         result = _unavailable_feed_result(result, unavailable_detail)
         status = _STEP_STATUS.get(result.get("status"), "done")
-        events.put_nowait(("tool_done", create_trace_step(step, dur, status)))
+        as_of = result["as_of"] if isinstance(result, dict) and result.get("as_of") else None
+        events.put_nowait(("tool_done", create_trace_step(step, dur, status, as_of=as_of)))
         return result
 
     async def _run_weather():
@@ -261,7 +265,8 @@ async def iter_evidence_signals(
         except Exception:
             weather = None
         dur = (time.perf_counter() - t0) * 1000
-        events.put_nowait(("tool_done", create_trace_step("weather_vector", dur, "done" if weather else "warning")))
+        as_of = weather.get("as_of") if isinstance(weather, dict) else None
+        events.put_nowait(("tool_done", create_trace_step("weather_vector", dur, "done" if weather else "warning", as_of=as_of)))
         return weather
 
     async def _run_web_search():
@@ -277,10 +282,11 @@ async def iter_evidence_signals(
 
     async def _orchestrate():
         p = get_params()
+        aqi_val = observation.get("aqi")
         try:
             async with asyncio.TaskGroup() as tg:
                 is_pm_elevated = (
-                    observation.get("aqi", 0) > p.aqi_elevated and "PM" in observation.get("primary_pollutant", "").upper()
+                    aqi_val is not None and aqi_val > p.aqi_elevated and "PM" in observation.get("primary_pollutant", "").upper()
                 )
 
                 # T=0: independent position-only tasks
@@ -296,7 +302,7 @@ async def iter_evidence_signals(
                     "metar_dust_scan", fetch_metar_dust(lat, lon), "METAR dust observations unavailable"
                 ))
                 openaq_t = tg.create_task(_run_feed(
-                    "openaq_monitors", collect_openaq_signal(lat, lon, include_baselines=observation.get("aqi", 0) > p.aqi_elevated, country_code=location.get("country_code") or "US"),
+                    "openaq_monitors", collect_openaq_signal(lat, lon, include_baselines=(aqi_val is not None and aqi_val > p.aqi_elevated), country_code=location.get("country_code") or "US"),
                     "OpenAQ concentration feed unavailable",
                 ))
                 place_t = tg.create_task(_run_feed(
