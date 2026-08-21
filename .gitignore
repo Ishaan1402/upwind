@@ -16,6 +16,9 @@ __pycache__/
 .coverage
 htmlcov/
 
+# Agent-local conventions & memory (not part of the repo)
+.dsh/
+
 # App caches and local database files
 backend/cache.db
 upwind.db

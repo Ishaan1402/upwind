@@ -26,12 +26,22 @@ CORS_ORIGINS = [
 
 RATE_LIMIT_AQI_PER_MIN = int(os.getenv("RATE_LIMIT_AQI_PER_MIN", "60"))
 RATE_LIMIT_WHY_PER_HOUR = int(os.getenv("RATE_LIMIT_WHY_PER_HOUR", "8"))
+RATE_LIMIT_EVENTS_PER_MIN = int(os.getenv("RATE_LIMIT_EVENTS_PER_MIN", "120"))
 TRUST_PROXY = os.getenv("TRUST_PROXY", "0").strip() in ("1", "true", "True")
 
 # Cost estimation for the metrics dashboard. Update these when provider
 # pricing changes; the dashboard labels the result as an estimate.
 LLM_INPUT_PRICE_PER_1M = float(os.getenv("LLM_INPUT_PRICE_PER_1M", "0.27"))
 LLM_OUTPUT_PRICE_PER_1M = float(os.getenv("LLM_OUTPUT_PRICE_PER_1M", "1.10"))
+
+# LLM judge pricing (Groq). llama-3.3-70b-versatile; the fallback
+# llama-3.1-8b-instant is cheaper — these are per-1M-token estimates.
+LLM_JUDGE_INPUT_PRICE_PER_1M = float(os.getenv("LLM_JUDGE_INPUT_PRICE_PER_1M", "0.59"))
+LLM_JUDGE_OUTPUT_PRICE_PER_1M = float(os.getenv("LLM_JUDGE_OUTPUT_PRICE_PER_1M", "0.79"))
+
+# Raw event rows are pruned after this many days; the dashboard reads the
+# daily rollup for older windows.
+METRICS_RETENTION_DAYS = int(os.getenv("METRICS_RETENTION_DAYS", "90"))
 
 # Observation tokens bind /api/aqi responses to /api/why requests so clients
 # cannot fabricate observations. Set a strong secret and enable enforcement in
