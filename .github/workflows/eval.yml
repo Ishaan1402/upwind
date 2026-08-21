@@ -64,6 +64,13 @@ jobs:
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
         run: python -m backend.eval_validation --out validation.json
 
+      # Bake workflow statuses server-side so the public evidence page never
+      # hits the rate-limited unauthenticated GitHub API from visitors' browsers.
+      - name: Fetch workflow statuses
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python -m backend.eval workflow-status --out workflow_status.json
+
       # Upload before the threshold gate: a failed eval must still keep its
       # evidence and reach the dashboard instead of disappearing.
       - name: Upload eval artifacts
@@ -75,6 +82,7 @@ jobs:
             corpus.json
             compare.json
             validation.json
+            workflow_status.json
 
       - name: Check pass-rate threshold and summarize
         env:
@@ -148,6 +156,7 @@ jobs:
           [ -f eval-results/corpus.json ] && FILES="$FILES eval-results/corpus.json"
           [ -f eval-results/compare.json ] && FILES="$FILES eval-results/compare.json"
           [ -f eval-results/validation.json ] && FILES="$FILES eval-results/validation.json"
+          [ -f eval-results/workflow_status.json ] && FILES="$FILES eval-results/workflow_status.json"
 
           # Runs on the VM so production stats from cache.db are embedded fresh.
           REMOTE='set -e
@@ -157,10 +166,13 @@ jobs:
           ./venv/bin/python -m backend.eval stats --out /tmp/eval_stats.json
           ./venv/bin/python -m backend.eval rule-judge --out /tmp/eval_rule_hits.json
           ./venv/bin/python -m backend.metrics report --days 30 --out /tmp/eval_metrics.json
+          ./venv/bin/python -m backend.metrics rollup
+          ./venv/bin/python -m backend.metrics prune
           ARGS=""
           [ -f /tmp/corpus.json ] && ARGS="$ARGS --corpus /tmp/corpus.json"
           [ -f /tmp/compare.json ] && ARGS="$ARGS --compare /tmp/compare.json"
           [ -f /tmp/validation.json ] && ARGS="$ARGS --validation /tmp/validation.json"
+          [ -f /tmp/workflow_status.json ] && ARGS="$ARGS --workflows /tmp/workflow_status.json"
           ./venv/bin/python -m backend.eval render-dashboard $ARGS --stats /tmp/eval_stats.json --rule-hits /tmp/eval_rule_hits.json --metrics /tmp/eval_metrics.json --out ~/eval-www/index.html
           mkdir -p ~/eval-www/evidence
           ./venv/bin/python -m backend.eval render-dashboard --public $ARGS --stats /tmp/eval_stats.json --rule-hits /tmp/eval_rule_hits.json --metrics /tmp/eval_metrics.json --out ~/eval-www/evidence/index.html
