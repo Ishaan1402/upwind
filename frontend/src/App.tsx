@@ -5,7 +5,7 @@ import { SearchBar } from './components/SearchBar';
 import { MapView } from './components/MapView';
 import { AqiCard } from './components/AqiCard';
 import { WhyDrawer } from './components/WhyDrawer';
-import { fetchAqiData, fetchAqiByCoords } from './services/api';
+import { fetchAqiData, fetchAqiByCoords, trackEvent, locationDetail } from './services/api';
 
 export const App: React.FC = () => {
   const [location, setLocation] = useState<LocationInfo | null>(null);
@@ -17,6 +17,7 @@ export const App: React.FC = () => {
   const [errorAqi, setErrorAqi] = useState<string | null>(null);
 
   const [drawerOpen, setDrawerOpen] = useState<boolean>(false);
+  const reqIdRef = React.useRef(0);
 
   // Load default location on initial mount (e.g. 90210 Beverly Hills / Los Angeles)
   useEffect(() => {
@@ -37,40 +38,49 @@ export const App: React.FC = () => {
   }, [errorAqi]);
 
   const handleSearch = async (query: string) => {
+    const reqId = ++reqIdRef.current;
     setLoadingAqi(true);
     setErrorAqi(null);
     try {
       const res = await fetchAqiData(query);
+      if (reqId !== reqIdRef.current) return;
       setLocation(res.location);
       setObservation(res.observation);
       setCoverage(res.coverage ?? null);
       setObservationToken(res.observation_token ?? null);
       setWhyData(null);
+      trackEvent('aqi_view', query.trim());
     } catch (err: any) {
+      if (reqId !== reqIdRef.current) return;
       setErrorAqi(err.message || 'Upwind currently covers US states & territories only.');
     } finally {
-      setLoadingAqi(false);
+      if (reqId === reqIdRef.current) setLoadingAqi(false);
     }
   };
 
   const handleMapClick = async (lat: number, lon: number) => {
+    const reqId = ++reqIdRef.current;
     setLoadingAqi(true);
     setErrorAqi(null);
     try {
       const res = await fetchAqiByCoords(lat, lon);
+      if (reqId !== reqIdRef.current) return;
       setLocation(res.location);
       setObservation(res.observation);
       setCoverage(res.coverage ?? null);
       setObservationToken(res.observation_token ?? null);
       setWhyData(null);
+      trackEvent('aqi_view', `${Number(lat).toFixed(4)},${Number(lon).toFixed(4)}`);
     } catch (err: any) {
+      if (reqId !== reqIdRef.current) return;
       setErrorAqi(err.message || 'Upwind currently covers US states & territories only.');
     } finally {
-      setLoadingAqi(false);
+      if (reqId === reqIdRef.current) setLoadingAqi(false);
     }
   };
 
   const handleShowWhy = () => {
+    if (location) trackEvent('why_open', locationDetail(location));
     setDrawerOpen(true);
   };
 

@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import type { CoverageInfo, LocationInfo, ObservationInfo, SignalItem, HypothesisItem } from '../types/aqi';
-import { streamWhyExplanation } from '../services/api';
+import { streamWhyExplanation, trackEvent, locationDetail } from '../services/api';
 import { X, AlertCircle, Sparkles, CheckCircle2, XCircle, Loader2, Radio, Flame, Wind, Cpu, Search, Gauge, CloudFog, Flag, Users, ChevronDown, ChevronUp, Circle } from 'lucide-react';
 
 interface WhyDrawerProps {
@@ -26,6 +26,8 @@ const DEFAULT_STEPS: InternalToolStep[] = [
   { step: 'weather_vector', label: 'Wind & temperature', status: 'pending', icon: Wind },
   { step: 'aod_density', label: 'Aerosol density (AOD)', status: 'pending', icon: Radio },
   { step: 'hms_scan', label: 'Smoke plume analysis', status: 'pending', icon: CloudFog },
+  { step: 'nws_dust_scan', label: 'NWS dust alerts', status: 'pending', icon: Wind },
+  { step: 'metar_dust_scan', label: 'METAR dust report', status: 'pending', icon: CloudFog },
   { step: 'openaq_monitors', label: 'Monitor concentrations', status: 'pending', icon: Gauge },
   { step: 'place_context', label: 'Local population context', status: 'pending', icon: Users },
   { step: 'web_search', label: 'News & incident search', status: 'pending', icon: Search },
@@ -164,9 +166,10 @@ export const WhyDrawer: React.FC<WhyDrawerProps> = ({
       },
       onComplete: (data) => {
         setIsStreamingLLM(false);
-        if (data.narrative && !streamedNarrative) {
-          setStreamedNarrative(data.narrative);
+        if (data.narrative) {
+          setStreamedNarrative(prev => prev || data.narrative);
         }
+        if (location) trackEvent('briefing_completed', locationDetail(location));
       },
       onError: (err) => {
         setIsStreamingLLM(false);
