@@ -34,10 +34,9 @@ TRUST_PROXY = os.getenv("TRUST_PROXY", "0").strip() in ("1", "true", "True")
 LLM_INPUT_PRICE_PER_1M = float(os.getenv("LLM_INPUT_PRICE_PER_1M", "0.27"))
 LLM_OUTPUT_PRICE_PER_1M = float(os.getenv("LLM_OUTPUT_PRICE_PER_1M", "1.10"))
 
-# LLM judge pricing (Groq). llama-3.3-70b-versatile; the fallback
-# llama-3.1-8b-instant is cheaper — these are per-1M-token estimates.
-LLM_JUDGE_INPUT_PRICE_PER_1M = float(os.getenv("LLM_JUDGE_INPUT_PRICE_PER_1M", "0.59"))
-LLM_JUDGE_OUTPUT_PRICE_PER_1M = float(os.getenv("LLM_JUDGE_OUTPUT_PRICE_PER_1M", "0.79"))
+# LLM judge pricing (Groq openai/gpt-oss-120b per 1M tokens)
+LLM_JUDGE_INPUT_PRICE_PER_1M = float(os.getenv("LLM_JUDGE_INPUT_PRICE_PER_1M", "0.15"))
+LLM_JUDGE_OUTPUT_PRICE_PER_1M = float(os.getenv("LLM_JUDGE_OUTPUT_PRICE_PER_1M", "0.60"))
 
 # Raw event rows are pruned after this many days; the dashboard reads the
 # daily rollup for older windows.

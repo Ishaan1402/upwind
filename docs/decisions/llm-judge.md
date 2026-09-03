@@ -28,9 +28,10 @@ roadmap for later improvements.
 
 ### Current state
 
-- **Judge** (`backend/llm_judge.py`): Groq `llama-3.3-70b-versatile` with
-  fallback `llama-3.1-8b-instant`, `response_format={"type":"json_object"}`,
-  temperature 0. Emits JSON: `grounded`, `hallucinations[]`, `leaked_jargon[]`,
+- **Judge** (`backend/llm_judge.py`): Groq `openai/gpt-oss-120b` with
+  fallback `openai/gpt-oss-20b` (Llama 3.3 70B / 3.1 8B were decommissioned
+  2026-08-16). `response_format={"type":"json_object"}`, temperature 0.
+  Emits JSON: `grounded`, `hallucinations[]`, `leaked_jargon[]`,
   `has_disallowed_headers`, `has_actionable_tip`, `verdict`, `reasoning`.
 - **Briefer** (`backend/llm.py`): DeepSeek `deepseek-v4-flash`, max_tokens 600,
   temperature 0.4.

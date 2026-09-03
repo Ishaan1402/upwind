@@ -13,7 +13,7 @@ SAMPLE_CORPUS = [
         "narrative": "Smoke is drifting in from the northwest.",
         "verdict": {
             "verdict": "pass",
-            "judge_model": "llama-3.3-70b-versatile",
+            "judge_model": "openai/gpt-oss-120b",
             "reasoning": "Matches FIRMS hotspots upwind.",
         },
     }
@@ -34,7 +34,7 @@ SAMPLE_STATS = {
     "top_hallucinations": [["invented fire", 1]],
     "top_jargon": [["AOD", 1]],
     "by_top_hypothesis": {"wildfire_smoke": 2, "urban_pm": 1},
-    "judge_models": {"llama-3.3-70b-versatile": 3},
+    "judge_models": {"openai/gpt-oss-120b": 3},
 }
 
 
@@ -119,7 +119,7 @@ def test_render_label_validation_shows_in_live_quality():
         metrics={"quality": {}},
         validation={"exact_agreement": 0.7, "cohens_kappa": 0.5, "judged_cases": 7, "results": []},
     )
-    assert "awaiting agent-labeled samples" in page2
+    assert "awaiting labeled samples" in page2
     assert "judge vs label agreement" not in page2
     assert "70.0%" in page2  # present only inside the offline benchmark section
 
