@@ -296,7 +296,7 @@ def _quality_section(metrics: Optional[Dict[str, Any]], label_validation: Option
             (_num(agreement.get("judged_cases", 0)), "judged cases"),
         ])
     else:
-        agreement_note = '<p class="empty">Label-validation metrics are awaiting agent-labeled samples of live narratives — judge-vs-label agreement, Cohen’s kappa, and per-class precision/recall/F1 will appear here once the first batch is labeled.</p>'
+        agreement_note = '<p class="empty">Label-validation metrics are awaiting labeled samples of live narratives.</p>'
     verdict_rows = [[html.escape(str(k)), _num(v)] for k, v in (quality.get("judge") or {}).items()]
     hyp_rows = [[html.escape(str(k)), _num(v)] for k, v in (quality.get("top_hypotheses") or {}).items()]
     return (
