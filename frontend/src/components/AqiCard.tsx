@@ -1,10 +1,11 @@
 import React from 'react';
-import type { LocationInfo, ObservationInfo } from '../types/aqi';
+import type { CoverageInfo, LocationInfo, ObservationInfo } from '../types/aqi';
 import { HelpCircle, Layers } from 'lucide-react';
 
 interface AqiCardProps {
   location: LocationInfo;
   observation: ObservationInfo;
+  coverage?: CoverageInfo | null;
   onShowWhy: () => void;
   loadingWhy?: boolean;
 }
@@ -23,6 +24,7 @@ function formatAsOf(asOfStr?: string): string {
 export const AqiCard: React.FC<AqiCardProps> = ({
   location,
   observation,
+  coverage,
   onShowWhy,
   loadingWhy = false
 }) => {
@@ -60,6 +62,11 @@ export const AqiCard: React.FC<AqiCardProps> = ({
           <div className="meta-item" style={{ fontSize: '0.75rem', opacity: 0.7, marginTop: '2px' }}>
             <span>Source: {observation.source || 'AirNow'}{formattedTime ? ` • ${formattedTime}` : ''}</span>
           </div>
+          {coverage && coverage.mode !== 'us' && (
+            <div className="meta-item" style={{ fontSize: '0.75rem', opacity: 0.7, marginTop: '2px' }}>
+              <span>{coverage.mode === 'international' ? 'International data' : 'Best-effort data'} • {coverage.aqi_index}</span>
+            </div>
+          )}
         </div>
       </div>
 

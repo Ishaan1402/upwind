@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
-import type { LocationInfo, ObservationInfo, SignalItem, HypothesisItem } from '../types/aqi';
-import { streamWhyExplanation } from '../services/api';
+import type { CoverageInfo, LocationInfo, ObservationInfo, SignalItem, HypothesisItem } from '../types/aqi';
+import { streamWhyExplanation, trackEvent, locationDetail } from '../services/api';
 import { X, AlertCircle, Sparkles, CheckCircle2, XCircle, Loader2, Radio, Flame, Wind, Cpu, Search, Gauge, CloudFog, Flag, Users, ChevronDown, ChevronUp, Circle } from 'lucide-react';
 
 interface WhyDrawerProps {
@@ -8,7 +8,9 @@ interface WhyDrawerProps {
   onClose: () => void;
   location: LocationInfo | null;
   observation: ObservationInfo | null;
-  onSignalsReady?: (data: { signals: SignalItem[]; hypotheses: HypothesisItem[]; open_questions: string[]; map_layers?: any; execution_trace?: any[]; total_ms?: number }) => void;
+  coverage?: CoverageInfo | null;
+  observationToken?: string | null;
+  onSignalsReady?: (data: { signals: SignalItem[]; hypotheses: HypothesisItem[]; open_questions: string[]; map_layers?: any; execution_trace?: any[]; coverage?: CoverageInfo; total_ms?: number }) => void;
 }
 
 interface InternalToolStep {
@@ -24,6 +26,8 @@ const DEFAULT_STEPS: InternalToolStep[] = [
   { step: 'weather_vector', label: 'Wind & temperature', status: 'pending', icon: Wind },
   { step: 'aod_density', label: 'Aerosol density (AOD)', status: 'pending', icon: Radio },
   { step: 'hms_scan', label: 'Smoke plume analysis', status: 'pending', icon: CloudFog },
+  { step: 'nws_dust_scan', label: 'NWS dust alerts', status: 'pending', icon: Wind },
+  { step: 'metar_dust_scan', label: 'METAR dust report', status: 'pending', icon: CloudFog },
   { step: 'openaq_monitors', label: 'Monitor concentrations', status: 'pending', icon: Gauge },
   { step: 'place_context', label: 'Local population context', status: 'pending', icon: Users },
   { step: 'web_search', label: 'News & incident search', status: 'pending', icon: Search },
@@ -37,6 +41,8 @@ export const WhyDrawer: React.FC<WhyDrawerProps> = ({
   onClose,
   location,
   observation,
+  coverage,
+  observationToken,
   onSignalsReady: onSignalsReadyProp
 }) => {
   const [toolSteps, setToolSteps] = useState<InternalToolStep[]>(DEFAULT_STEPS);
@@ -160,20 +166,21 @@ export const WhyDrawer: React.FC<WhyDrawerProps> = ({
       },
       onComplete: (data) => {
         setIsStreamingLLM(false);
-        if (data.narrative && !streamedNarrative) {
-          setStreamedNarrative(data.narrative);
+        if (data.narrative) {
+          setStreamedNarrative(prev => prev || data.narrative);
         }
+        if (location) trackEvent('briefing_completed', locationDetail(location));
       },
       onError: (err) => {
         setIsStreamingLLM(false);
         setError(err.message || 'Error streaming live evidence explanation.');
       }
-    });
+    }, observationToken);
 
     return () => {
       closeStream();
     };
-  }, [isOpen, location, observation]);
+  }, [isOpen, location, observation, observationToken]);
 
   if (!isOpen) return null;
 
@@ -343,6 +350,11 @@ export const WhyDrawer: React.FC<WhyDrawerProps> = ({
               {/* Streaming Narrative Briefing Box */}
               <div className="narrative-box">
                 <h4 className="section-subtitle">Briefing</h4>
+                {coverage && coverage.mode !== 'us' && (
+                  <p className="coverage-note" style={{ fontSize: '0.75rem', color: '#94a3b8', marginBottom: '8px' }}>
+                    {coverage.mode === 'international' ? 'International data' : 'Best-effort data'} • {coverage.disclaimer}
+                  </p>
+                )}
                 <p className="narrative-text">
                   {streamedNarrative}
                   {isStreamingLLM && <span className="streaming-cursor">▋</span>}

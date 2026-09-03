@@ -8,22 +8,25 @@ Subcommands:
   export-fails   dump judge-failed narratives to JSON or CSV for review
   corpus         generate + judge narratives for the fixed scenario corpus
   judge-compare  compare the default judge vs JUDGE_MODEL candidate on the corpus
+  workflow-status  fetch latest workflow run statuses for the evidence page
 """
 
 import argparse
 import asyncio
 import csv
 import json
+import os
 import re
 import sqlite3
 import sys
+import urllib.request
 from collections import Counter
 from typing import Any, Dict, List, Optional
 from unittest.mock import patch
 
 from backend.db import DB_PATH
 from backend.eval_corpus import CORPUS
-from backend.eval_report import render_dashboard
+from backend.eval_report import REPO, WORKFLOWS, render_dashboard
 from backend.engine.score import score_hypotheses
 from backend.llm import generate_narrative_briefing
 from backend.llm_judge import judge_narrative
@@ -146,9 +149,9 @@ async def run_corpus() -> List[Dict[str, Any]]:
         observation = scenario["observation"]
         signals = scenario["signals"]
         hypotheses, open_questions = score_hypotheses(observation, signals)
-        narrative = await generate_narrative_briefing(
+        narrative = (await generate_narrative_briefing(
             scenario["location"], observation, signals, hypotheses, open_questions
-        )
+        )).narrative
         evidence = {
             "location": scenario["location"],
             "observation": observation,
@@ -160,7 +163,7 @@ async def run_corpus() -> List[Dict[str, Any]]:
         verdict = await judge_narrative(evidence, narrative)
         results.append({
             "scenario": scenario["name"],
-            "verdict": verdict,
+            "verdict": verdict.to_dict(),
             "narrative": narrative,
             "top_hypothesis": _top_hypothesis(evidence),
         })
@@ -173,9 +176,9 @@ async def run_judge_compare(alt_model: str) -> List[Dict[str, Any]]:
         observation = scenario["observation"]
         signals = scenario["signals"]
         hypotheses, open_questions = score_hypotheses(observation, signals)
-        narrative = await generate_narrative_briefing(
+        narrative = (await generate_narrative_briefing(
             scenario["location"], observation, signals, hypotheses, open_questions
-        )
+        )).narrative
         evidence = {
             "location": scenario["location"],
             "observation": observation,
@@ -189,8 +192,8 @@ async def run_judge_compare(alt_model: str) -> List[Dict[str, Any]]:
             alt_verdict = await judge_narrative(evidence, narrative)
         results.append({
             "scenario": scenario["name"],
-            "default_verdict": default_verdict,
-            "alt_verdict": alt_verdict,
+            "default_verdict": default_verdict.to_dict(),
+            "alt_verdict": alt_verdict.to_dict(),
         })
     return results
 
@@ -222,6 +225,52 @@ def _print_compare(results: List[Dict[str, Any]]) -> None:
     print(f"\nagreement: {agreement}/{len(results)}")
 
 
+def fetch_workflow_statuses(
+    repo: str = REPO,
+    workflows: Optional[List[tuple]] = None,
+    token: Optional[str] = None,
+    timeout: int = 8,
+) -> List[Dict[str, Any]]:
+    """Fetch the latest run per workflow from the GitHub API.
+
+    Called server-side during the nightly render so the evidence page bakes
+    statuses into the static HTML instead of depending on unauthenticated
+    client-side API calls (rate-limited to 60/hr/IP). Never raises per
+    workflow: failures record status "unavailable".
+    """
+    workflows = workflows or WORKFLOWS
+    results: List[Dict[str, Any]] = []
+    for file, label in workflows:
+        entry: Dict[str, Any] = {"file": file, "label": label, "status": "unavailable"}
+        try:
+            url = f"https://api.github.com/repos/{repo}/actions/workflows/{file}/runs?per_page=1"
+            req = urllib.request.Request(
+                url,
+                headers={
+                    "Accept": "application/vnd.github+json",
+                    "User-Agent": "upwind-eval",
+                },
+            )
+            if token:
+                req.add_header("Authorization", f"Bearer {token}")
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+            run = (data.get("workflow_runs") or [{}])[0] or {}
+            entry.update({
+                "status": run.get("conclusion") or run.get("status") or "unknown",
+                "run_number": run.get("run_number"),
+                "branch": run.get("head_branch"),
+                "sha": (run.get("head_sha") or "")[:7],
+                "html_url": run.get("html_url"),
+                "created_at": run.get("created_at"),
+            })
+        except Exception as e:
+            entry["status"] = "unavailable"
+            entry["error"] = str(e)[:120]
+        results.append(entry)
+    return results
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(prog="backend.eval", description=__doc__)
     parser.add_argument("--db", default=DB_PATH, help="SQLite cache path (default: backend/cache.db)")
@@ -244,6 +293,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     compare.add_argument("--model", required=True, help="candidate judge model (e.g. JUDGE_MODEL value)")
     compare.add_argument("--out", help="optional JSON output path")
 
+    wf = subparsers.add_parser("workflow-status", help="fetch latest workflow run statuses for the evidence page")
+    wf.add_argument("--out", required=True, help="output JSON path")
+
     dashboard = subparsers.add_parser(
         "render-dashboard",
         help="build the static eval dashboard HTML (publishes to VM via nightly workflow)",
@@ -252,6 +304,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     dashboard.add_argument("--compare", help="JSON file from `judge-compare --out`")
     dashboard.add_argument("--stats", help="JSON file from `stats --out`")
     dashboard.add_argument("--rule-hits", help="JSON file from `rule-judge --out`")
+    dashboard.add_argument("--metrics", help="JSON file from `python -m backend.metrics report --out`")
+    dashboard.add_argument("--validation", help="JSON file from `python -m backend.eval_validation --out`")
+    dashboard.add_argument("--label-validation", help="JSON file from `python -m backend.human_labels validate --out` (agent/human labels on live narratives)")
+    dashboard.add_argument("--workflows", help="JSON file from `workflow-status --out` (baked CI statuses)")
+    dashboard.add_argument("--public", action="store_true", help="hide narratives/cache keys for a public page")
     dashboard.add_argument("--out", required=True, help="output HTML path")
 
     args = parser.parse_args(argv)
@@ -288,6 +345,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         if args.out:
             with open(args.out, "w") as f:
                 json.dump(results, f, indent=2)
+    elif args.command == "workflow-status":
+        results = fetch_workflow_statuses(token=os.getenv("GITHUB_TOKEN"))
+        with open(args.out, "w") as f:
+            json.dump(results, f, indent=2)
+        print(f"wrote {len(results)} workflow statuses to {args.out}")
     elif args.command == "render-dashboard":
         def _load(path):
             if not path:
@@ -300,6 +362,11 @@ def main(argv: Optional[List[str]] = None) -> int:
             compare=_load(args.compare),
             stats=_load(args.stats),
             rule_hits=_load(args.rule_hits),
+            metrics=_load(args.metrics),
+            validation=_load(args.validation),
+            label_validation=_load(args.label_validation),
+            workflows=_load(args.workflows),
+            public=args.public,
         )
         with open(args.out, "w") as f:
             f.write(page)

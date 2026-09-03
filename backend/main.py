@@ -3,7 +3,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
-from backend.routers import aqi, why
+from backend.routers import aqi, why, events
 from backend.config import PORT, CORS_ORIGINS
 from backend.db import init_db
 from backend.middleware.rate_limit import RateLimitAndLoggingMiddleware
@@ -30,6 +30,7 @@ app.add_middleware(CORSMiddleware,
 
 app.include_router(aqi.router)
 app.include_router(why.router)
+app.include_router(events.router)
 
 @app.get("/health")
 async def health():
@@ -56,8 +57,11 @@ if DIST_DIR.exists() and DIST_DIR.is_dir():
         ):
             return JSONResponse(status_code=404, content={"detail": "Not found"})
         
-        target_file = DIST_DIR / full_path
-        if target_file.exists() and target_file.is_file():
+        # Resolve against the dist root and require containment so traversal
+        # segments (e.g. /assets/../../backend/metrics.py) can never escape.
+        dist_root = DIST_DIR.resolve()
+        target_file = (dist_root / full_path).resolve()
+        if target_file.is_file() and target_file.is_relative_to(dist_root):
             return FileResponse(target_file)
         
         index_file = DIST_DIR / "index.html"

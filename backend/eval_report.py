@@ -1,18 +1,22 @@
-"""Static HTML dashboard for Upwind CI and narrative eval results.
+"""Static HTML evidence page for Upwind observability.
 
-Rendered by the nightly eval workflow and published to the VM behind nginx
-basic auth (https://getupwind.me/eval/). Fully self-contained: stdlib only,
-no CDN assets, so nothing about the page leaks outside the VM.
+Rendered by the nightly eval workflow and published to the VM
+(https://getupwind.me/evidence/). One page, clean vertical nav on the left
+separating observability topics: Scale, Performance, Quality, Efficiency,
+Reliability, plus a clearly-labeled Offline benchmark section. Fully
+self-contained: stdlib only, no CDN assets.
 
 Usage (via the backend.eval CLI):
     python -m backend.eval render-dashboard \
         --corpus corpus.json --compare compare.json \
-        --stats stats.json --rule-hits rule_hits.json --out eval.html
+        --stats stats.json --rule-hits rule_hits.json \
+        --metrics metrics.json --validation validation.json --out evidence.html
 """
 
 import html
 import json
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 REPO = "Ishaan1402/upwind"
@@ -39,7 +43,36 @@ def _table(headers: List[str], rows: List[List[str]], empty_msg: str = "No data 
     return f'<table><thead><tr>{head}</tr></thead><tbody>{body}</tbody></table>'
 
 
-def _corpus_table(corpus: List[Dict[str, Any]]) -> str:
+def _cards(items: List[tuple]) -> str:
+    """A compact stat strip (key, value). Not boxy: one clean row of stats."""
+    cells = "".join(
+        f'<div class="stat"><span class="num">{value}</span><span class="lbl">{html.escape(label)}</span></div>'
+        for value, label in items
+    )
+    return f'<div class="stats">{cells}</div>'
+
+
+def _pct(value: Optional[float], nd: int = 1) -> str:
+    if value is None:
+        return "n/a"
+    return f"{value * 100:.{nd}f}%"
+
+
+def _money(value: Optional[float], nd: int = 4) -> str:
+    if value is None:
+        return "n/a"
+    return f"${value:.{nd}f}"
+
+
+def _num(value: Optional[Any], suffix: str = "", nd: int = 0) -> str:
+    if value is None:
+        return "n/a"
+    if isinstance(value, float):
+        return f"{value:.{nd}f}{suffix}"
+    return f"{value}{suffix}"
+
+
+def _corpus_table(corpus: List[Dict[str, Any]], public: bool = False) -> str:
     if not corpus:
         return '<p class="empty">No corpus results yet (first nightly run pending).</p>'
     rows = ""
@@ -48,6 +81,11 @@ def _corpus_table(corpus: List[Dict[str, Any]]) -> str:
         reasoning = (verdict.get("reasoning") or "").replace("\n", " ").strip()
         short = reasoning[:90] + ("..." if len(reasoning) > 90 else "")
         narrative = html.escape(item.get("narrative") or "")
+        narrative_cell = (
+            f"<details><summary>full</summary><pre>{narrative}</pre></details>"
+            if not public
+            else '<span class="muted">hidden on public page</span>'
+        )
         rows += (
             "<tr>"
             f"<td>{html.escape(str(item.get('scenario') or ''))}</td>"
@@ -55,7 +93,7 @@ def _corpus_table(corpus: List[Dict[str, Any]]) -> str:
             f"<td>{html.escape(str(verdict.get('judge_model') or ''))}</td>"
             f"<td>{html.escape(str(item.get('top_hypothesis') or ''))}</td>"
             f"<td>{html.escape(short)}</td>"
-            f"<td><details><summary>full</summary><pre>{narrative}</pre></details></td>"
+            f"<td>{narrative_cell}</td>"
             "</tr>"
         )
     return (
@@ -89,14 +127,11 @@ def _stats_section(stats: Optional[Dict[str, Any]]) -> str:
     total = stats.get("total") or 0
     counts = stats.get("verdict_counts") or {}
     rate = stats.get("pass_rate")
-    rate_str = f"{rate * 100:.1f}%" if rate is not None else "n/a"
-    cards = (
-        '<div class="cards">'
-        f'<div class="card"><span class="num">{total}</span>judged narratives</div>'
-        f'<div class="card"><span class="num">{rate_str}</span>pass rate</div>'
-        f'<div class="card"><span class="num">{counts.get("fail", 0)}</span>failures</div>'
-        "</div>"
-    )
+    cards = _cards([
+        (_num(total), "judged narratives"),
+        (_pct(rate), "pass rate"),
+        (_num(counts.get("fail", 0)), "failures"),
+    ])
     count_rows = [[html.escape(str(k)), str(v)] for k, v in counts.items()]
     hypothesis_rows = [[html.escape(str(k)), str(v)] for k, v in (stats.get("by_top_hypothesis") or {}).items()]
     model_rows = [[html.escape(str(k)), str(v)] for k, v in (stats.get("judge_models") or {}).items()]
@@ -112,12 +147,13 @@ def _stats_section(stats: Optional[Dict[str, Any]]) -> str:
     )
 
 
-def _rule_hits_table(rule_hits: List[Dict[str, Any]]) -> str:
+def _rule_hits_table(rule_hits: List[Dict[str, Any]], public: bool = False) -> str:
     if not rule_hits:
         return '<p class="ok-line">No rule-judge violations in the cache.</p>'
+    cache_key_col = "key" if not public else "hidden"
     rows = [
         [
-            html.escape(str(hit.get("cache_key") or "")),
+            html.escape(str(hit.get("cache_key") or "")) if not public else "hidden",
             html.escape(str(hit.get("created_at") or "")),
             html.escape(", ".join(hit.get("jargon") or []) or "-"),
             "yes" if hit.get("has_disallowed_headers") else "no",
@@ -125,7 +161,270 @@ def _rule_hits_table(rule_hits: List[Dict[str, Any]]) -> str:
         ]
         for hit in rule_hits
     ]
-    return _table(["cache key", "created", "jargon", "headers", "missing tip"], rows)
+    return _table([cache_key_col, "created", "jargon", "headers", "missing tip"], rows)
+
+
+# --------------------------------------------------------------------------- #
+# Live observability sections (all from production traffic, not benchmarks)    #
+# --------------------------------------------------------------------------- #
+
+def _scale_section(metrics: Optional[Dict[str, Any]]) -> str:
+    if not metrics:
+        return '<p class="empty">No metrics yet (first nightly run pending).</p>'
+    scale = metrics.get("scale") or {}
+    window = metrics.get("window_days", 30)
+    cards = _cards([
+        (_num(scale.get("requests_total", 0)), f"requests / {window}d"),
+        (_num(scale.get("why_total", 0)), "why explanations"),
+        (_num(scale.get("distinct_locations", 0)), "distinct locations"),
+        (_num(scale.get("narratives_cached_total", 0)), "narratives cached"),
+    ])
+    daily = scale.get("requests_daily") or {}
+    why_daily = scale.get("why_daily") or {}
+    recent_days = sorted(set(list(daily.keys()) + list(why_daily.keys())))[-14:]
+    daily_rows = [
+        [html.escape(d), _num(daily.get(d, 0)), _num(why_daily.get(d, 0))]
+        for d in reversed(recent_days)
+    ]
+    coverage_rows = [[html.escape(str(k)), _num(v)] for k, v in (scale.get("coverage_modes") or {}).items()]
+    events_rows = [[html.escape(str(k)), _num(v)] for k, v in (scale.get("user_events") or {}).items()]
+    return (
+        cards
+        + "<h3>Daily volume (last 14 days)</h3>"
+        + _table(["date", "requests", "why"], daily_rows, "No request volume yet.")
+        + "<h3>Coverage modes</h3>" + _table(["mode", "explanations"], coverage_rows, "No coverage data yet.")
+        + "<h3>User events</h3>" + _table(["event", "count"], events_rows, "No user events yet.")
+    )
+
+
+def _performance_section(metrics: Optional[Dict[str, Any]]) -> str:
+    if not metrics:
+        return '<p class="empty">No metrics yet (first nightly run pending).</p>'
+    perf = metrics.get("performance") or {}
+    overall = perf.get("overall") or {}
+    peak = perf.get("peak_req_per_hour") or {}
+    wall = perf.get("why_wall_ms") or {}
+    cache_split = perf.get("cache_split_ms") or {}
+    cards = _cards([
+        (_num(overall.get("p50_ms"), " ms"), "p50 latency"),
+        (_num(overall.get("p95_ms"), " ms"), "p95 latency"),
+        (_num(overall.get("p99_ms"), " ms"), "p99 latency"),
+        (_num(peak.get("count", 0)), f"peak req/hour ({html.escape(str(peak.get('hour') or '?'))})"),
+        (_num(wall.get("p95_ms"), " ms"), "why wall p95"),
+        (_num(cache_split.get("cache_miss_p95_ms"), " ms"), "miss p95 vs hit p95 " + _num(cache_split.get("cache_hit_p95_ms"), " ms")),
+    ])
+    latency_rows = [
+        [
+            html.escape(str(endpoint)),
+            _num(details.get("count")),
+            _num(details.get("p50_ms")),
+            _num(details.get("p95_ms")),
+            _num(details.get("p99_ms")),
+            _num(details.get("max_ms")),
+        ]
+        for endpoint, details in sorted((perf.get("endpoints") or {}).items())
+    ]
+    steps = perf.get("steps") or {}
+    step_rows = [
+        [
+            html.escape(str(step)),
+            _num(s.get("count")),
+            _pct((s.get("availability_pct") or 0) / 100, 0) if s.get("availability_pct") is not None else "n/a",
+            _num(s.get("p50_ms")),
+            _num(s.get("p95_ms")),
+        ]
+        for step, s in sorted(steps.items())
+    ]
+    return (
+        cards
+        + "<h3>Latency by endpoint</h3>"
+        + _table(["endpoint", "count", "p50 ms", "p95 ms", "p99 ms", "max ms"], latency_rows, "No request latency yet.")
+        + "<h3>Evidence tool steps</h3>"
+        + _table(["step", "count", "availability", "p50 ms", "p95 ms"], step_rows, "No tool-step data yet.")
+    )
+
+
+def _quality_section(metrics: Optional[Dict[str, Any]], label_validation: Optional[Dict[str, Any]] = None) -> str:
+    if not metrics:
+        return '<p class="empty">No metrics yet (first nightly run pending).</p>'
+    why = metrics.get("why") or {}
+    quality = metrics.get("quality") or {}
+    narratives = metrics.get("narratives") or {}
+    len_stats = quality.get("narrative_length") or {}
+    over_150 = len_stats.get("pct_over_150_words")
+    if over_150 is None:
+        over_150 = narratives.get("pct_over_150_words")
+    # Streaming traffic is judged asynchronously; prefer the write-back verdicts
+    # (why_events) and fall back to cached narrative verdicts for legacy rows.
+    judge_rate = (
+        quality.get("judge_pass_rate")
+        or why.get("judge_pass_rate")
+        or why.get("cached_judge_pass_rate")
+    )
+    cards = _cards([
+        (_pct(judge_rate), "judge pass rate (live)"),
+        (_pct(quality.get("fallback_rate")), "deterministic fallback"),
+        (_pct(quality.get("gatekeeper_retry_rate")), "gatekeeper retries"),
+        (_num(len_stats.get("avg_words", narratives.get("avg_words")), " words"), "avg narrative length"),
+        (_pct(over_150 / 100) if over_150 is not None else "n/a", "narratives &gt; 150 words"),
+    ])
+    agreement = quality.get("agreement")
+    label_source = (label_validation or {}).get("label_source") or ""
+    if label_validation and label_source in ("human", "agent"):
+        precision = label_validation.get("precision") or {}
+        recall = label_validation.get("recall") or {}
+        f1 = label_validation.get("f1") or {}
+        prf_rows = [
+            ["pass", _pct(precision.get("pass")), _pct(recall.get("pass")), _pct(f1.get("pass"))],
+            ["fail", _pct(precision.get("fail")), _pct(recall.get("fail")), _pct(f1.get("fail"))],
+        ]
+        agreement_note = (
+            f'<p class="muted">Judge agreement vs {label_source} labels on sampled '
+            "live narratives (the honest quality signal).</p>"
+            + _cards([
+                (_pct(label_validation.get("exact_agreement")), "judge vs label agreement"),
+                (_num(label_validation.get("cohens_kappa"), nd=2), "Cohen’s kappa"),
+                (_pct(label_validation.get("macro_f1")), "macro F1"),
+                (_num(label_validation.get("judged_cases", 0)), "judged cases"),
+            ])
+            + _table(["label", "precision", "recall", "F1"], prf_rows, "No label-validation rows yet.")
+        )
+    elif agreement is not None:
+        agreement_note = _cards([
+            (_pct(agreement.get("exact_agreement")), "judge vs label agreement"),
+            (_num(agreement.get("cohens_kappa"), nd=2), "Cohen’s kappa"),
+            (_num(agreement.get("judged_cases", 0)), "judged cases"),
+        ])
+    else:
+        agreement_note = '<p class="empty">Label-validation metrics are awaiting labeled samples of live narratives.</p>'
+    verdict_rows = [[html.escape(str(k)), _num(v)] for k, v in (quality.get("judge") or {}).items()]
+    hyp_rows = [[html.escape(str(k)), _num(v)] for k, v in (quality.get("top_hypotheses") or {}).items()]
+    return (
+        cards
+        + agreement_note
+        + "<h3>Judge verdicts (live)</h3>" + _table(["verdict", "count"], verdict_rows, "No live verdicts yet.")
+        + "<h3>Top hypotheses</h3>" + _table(["hypothesis", "explanations"], hyp_rows, "No hypotheses recorded.")
+    )
+
+
+def _efficiency_section(metrics: Optional[Dict[str, Any]]) -> str:
+    if not metrics:
+        return '<p class="empty">No metrics yet (first nightly run pending).</p>'
+    eff = metrics.get("efficiency") or {}
+    cards = _cards([
+        (_pct(eff.get("cache_hit_rate")), "cache hit rate"),
+        (_money(eff.get("llm_cost_per_explanation_usd")), "LLM cost / explanation"),
+        (_money(eff.get("judge_cost_per_explanation_usd")), "judge cost / explanation"),
+        (_money(eff.get("cost_saved_by_cache_usd")), "cost saved by cache"),
+    ])
+    token_rows = [
+        ["input", _num(eff.get("avg_input_tokens"))],
+        ["output", _num(eff.get("avg_output_tokens"))],
+        ["judge (in+out)", _num(eff.get("avg_judge_tokens"))],
+    ]
+    cost_rows = [
+        ["LLM total", _money(eff.get("llm_cost_usd"))],
+        ["Judge total", _money(eff.get("judge_cost_usd"))],
+        ["Cache hits", _num(eff.get("cache_hits"))],
+        ["Cache misses", _num(eff.get("cache_misses"))],
+    ]
+    return (
+        cards
+        + "<h3>Tokens per explanation</h3>" + _table(["stream", "avg tokens"], token_rows, "No token data yet.")
+        + "<h3>Cost ledger</h3>" + _table(["line", "value"], cost_rows, "No cost data yet.")
+    )
+
+
+def _reliability_section(metrics: Optional[Dict[str, Any]]) -> str:
+    if not metrics:
+        return '<p class="empty">No metrics yet (first nightly run pending).</p>'
+    rel = metrics.get("reliability") or {}
+    http = rel.get("http") or {}
+    health = rel.get("health") or {}
+    cards = _cards([
+        (_pct(http.get("uptime_proxy_pct") / 100, 2) if http.get("uptime_proxy_pct") is not None else "n/a", "uptime proxy"),
+        (_pct(http.get("5xx_rate")), "5xx rate"),
+        (_pct(http.get("503_rate")), "503 rate"),
+        (_pct(http.get("429_rate")), "429 rate"),
+        (_num(health.get("db_write_failures", 0)), "DB write failures"),
+    ])
+    feeds = rel.get("feeds") or {}
+    feed_rows = [
+        [
+            html.escape(str(step)),
+            _num(s.get("present", 0)),
+            _num(s.get("absent", 0)),
+            _num(s.get("unavailable", 0)),
+            _pct((s.get("availability_pct") or 0) / 100, 1) if s.get("availability_pct") is not None else "n/a",
+            _num(s.get("max_age_hours"), "h", 1),
+        ]
+        for step, s in sorted(feeds.items())
+    ]
+    return (
+        cards
+        + "<h3>Feed availability</h3>"
+        + _table(["feed", "present", "absent", "unavailable", "availability", "staleness"], feed_rows, "No feed data yet.")
+        + '<p class="muted">availability = feed responded (present or absent) vs failed/unreachable; '
+        'staleness = max age of feed-reported data (as_of) in hours.</p>'
+    )
+
+
+def _benchmark_section(
+    corpus: List[Dict[str, Any]],
+    compare: List[Dict[str, Any]],
+    stats: Optional[Dict[str, Any]],
+    rule_hits: List[Dict[str, Any]],
+    validation: Optional[Dict[str, Any]],
+    public: bool,
+) -> str:
+    """Offline, research-grade benchmark — explicitly not live truth."""
+    header = (
+        '<div class="bench-note">'
+        "<strong>Offline benchmark (research).</strong> "
+        "These numbers come from fixed scenarios, the IMPROVE-derived answer key, "
+        "and deterministic rule checks — not from live traffic. Treat them as a "
+        "lab signal; the Scale/Performance/Quality/Efficiency/Reliability sections "
+        "above are the live, production-measured truth."
+        "</div>"
+    )
+    validation_html = _validation_section(validation)
+    corpus_title = (
+        f"Corpus eval ({len(corpus)} fixed {'scenario' if len(corpus) == 1 else 'scenarios'})"
+    )
+    return (
+        header
+        + "<h3>Judge validation (known labels)</h3>" + validation_html
+        + f"<h3>{html.escape(corpus_title)}</h3>" + _corpus_table(corpus, public=public)
+        + "<h3>Judge comparison</h3>" + _compare_table(compare)
+        + "<h3>Production stats (VM narrative cache)</h3>" + _stats_section(stats)
+        + "<h3>Rule judge</h3>" + _rule_hits_table(rule_hits, public=public)
+    )
+
+
+def _validation_section(validation: Optional[Dict[str, Any]]) -> str:
+    if not validation:
+        return '<p class="empty">No human/known-label validation results yet.</p>'
+    agreement = validation.get("exact_agreement")
+    kappa = validation.get("cohens_kappa")
+    cards = _cards([
+        (_num(validation.get("judged_cases", 0)), "judged cases"),
+        (_pct(agreement), "judge agreement"),
+        (_num(kappa), "Cohen’s kappa"),
+    ])
+    rows = []
+    for item in validation.get("results") or []:
+        rows.append([
+            html.escape(str(item.get("name") or "")),
+            _badge(item.get("gold_verdict")),
+            _badge(item.get("judge_verdict")),
+            "yes" if item.get("agreement") else "no",
+            html.escape(str(item.get("judge_model") or "")),
+        ])
+    return cards + _table(
+        ["case", "gold", "judge", "agree", "judge model"],
+        rows,
+        "No validation rows.",
+    )
 
 
 def render_dashboard(
@@ -133,146 +432,72 @@ def render_dashboard(
     compare: Optional[List[Dict[str, Any]]] = None,
     stats: Optional[Dict[str, Any]] = None,
     rule_hits: Optional[List[Dict[str, Any]]] = None,
+    metrics: Optional[Dict[str, Any]] = None,
+    validation: Optional[Dict[str, Any]] = None,
+    label_validation: Optional[Dict[str, Any]] = None,
+    workflows: Optional[List[Dict[str, Any]]] = None,
+    public: bool = False,
     generated_at: Optional[str] = None,
 ) -> str:
-    """Build the full dashboard page as a single self-contained HTML string."""
+    """Build the full evidence page as a single self-contained HTML string.
+
+    ``workflows`` is the output of `python -m backend.eval workflow-status`
+    (baked server-side so the page never depends on the unauthenticated
+    GitHub API from visitors' browsers). ``label_validation`` is the
+    human/agent-labeled agreement output from backend.human_labels validate.
+    """
     if generated_at is None:
         generated_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     corpus = corpus or []
-    corpus_title = (
-        f"Corpus eval ({len(corpus)} fixed "
-        f"{'scenario' if len(corpus) == 1 else 'scenarios'})"
-    )
     data = json.dumps(
-        {"generated_at": generated_at, "repo": REPO, "workflows": WORKFLOWS},
+        {
+            "generated_at": generated_at,
+            "repo": REPO,
+            "workflows": WORKFLOWS,
+            "workflow_runs": workflows or [],
+            "public": public,
+        },
         separators=(",", ":"),
-    )
+    ).replace("<", "\\u003c")
     workflow_cards = "".join(
         f'<div class="card wf" id="wf-{file.replace(".", "-")}">'
         f'<span class="dot mute"></span><strong>{label}</strong>'
         '<div class="wf-meta">loading latest run…</div></div>'
         for file, label in WORKFLOWS
     )
-    return TEMPLATE.replace("__DATA_JSON__", data).replace(
-        "__WORKFLOW_CARDS__", workflow_cards
-    ).replace(
-        "__GENERATED_AT__", html.escape(generated_at)
-    ).replace(
-        "__CORPUS_TITLE__", corpus_title
-    ).replace(
-        "__CORPUS__", _corpus_table(corpus)
-    ).replace(
-        "__COMPARE__", _compare_table(compare or [])
-    ).replace(
-        "__STATS__", _stats_section(stats)
-    ).replace(
-        "__RULE_HITS__", _rule_hits_table(rule_hits or [])
+    sections = {
+        "overview": (
+            "<h2>Overview</h2>"
+            "<p class='muted'>CI status, headline numbers, and how this page is produced.</p>"
+            '<div class="cards" id="wf-cards">' + workflow_cards + "</div>"
+        ),
+        "scale": "<h2>Scale</h2>" + _scale_section(metrics),
+        "performance": "<h2>Performance</h2>" + _performance_section(metrics),
+        "quality": "<h2>Quality</h2>" + _quality_section(metrics, label_validation),
+        "efficiency": "<h2>Efficiency</h2>" + _efficiency_section(metrics),
+        "reliability": "<h2>Reliability</h2>" + _reliability_section(metrics),
+        "benchmark": "<h2>Offline benchmark</h2>" + _benchmark_section(corpus, compare, stats, rule_hits or [], validation, public),
+    }
+    nav = "".join(
+        f'<a href="#{sid}">{label}</a>'
+        for sid, label in [
+            ("overview", "Overview"),
+            ("scale", "Scale"),
+            ("performance", "Performance"),
+            ("quality", "Quality"),
+            ("efficiency", "Efficiency"),
+            ("reliability", "Reliability"),
+            ("benchmark", "Offline benchmark"),
+        ]
     )
+    content = "".join(f'<section id="{sid}">{body}</section>' for sid, body in sections.items())
+    return TEMPLATE.replace("__NAV__", nav).replace("__CONTENT__", content).replace(
+        "__DATA_JSON__", data
+    ).replace("__GENERATED_AT__", html.escape(generated_at))
 
 
-TEMPLATE = """<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Upwind eval dashboard</title>
-<style>
-:root { color-scheme: dark; }
-* { box-sizing: border-box; }
-body { margin: 0; background: #0d1117; color: #e6edf3; font: 14px/1.5 system-ui, -apple-system, sans-serif; }
-main { max-width: 980px; margin: 0 auto; padding: 24px 18px 56px; }
-header h1 { margin: 0 0 4px; font-size: 22px; }
-header p { margin: 0; color: #8b949e; }
-h2 { margin: 36px 0 10px; font-size: 17px; border-bottom: 1px solid #21262d; padding-bottom: 8px; }
-h3 { margin: 22px 0 8px; font-size: 14px; color: #c9d1d9; }
-.cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin: 14px 0; }
-.card { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 14px; }
-.card .num { display: block; font-size: 24px; font-weight: 700; }
-.wf { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
-.wf strong { min-width: 90px; }
-.wf-meta { color: #8b949e; font-size: 12px; }
-.dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
-.dot.ok { background: #3fb950; }
-.dot.bad { background: #f85149; }
-.dot.warn { background: #d29922; }
-.dot.mute { background: #484f58; }
-table { width: 100%; border-collapse: collapse; margin: 8px 0; }
-th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid #21262d; vertical-align: top; }
-th { color: #8b949e; font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
-td { font-size: 13px; }
-pre { background: #0d1117; border: 1px solid #30363d; border-radius: 6px; padding: 10px; overflow: auto; white-space: pre-wrap; }
-.badge { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 12px; font-weight: 600; }
-.badge.ok { background: rgba(63,185,80,.15); color: #3fb950; }
-.badge.bad { background: rgba(248,81,73,.15); color: #f85149; }
-.badge.warn { background: rgba(210,153,34,.15); color: #d29922; }
-.badge.mute { background: rgba(139,148,158,.15); color: #8b949e; }
-.empty { color: #8b949e; }
-.ok-line { color: #3fb950; }
-details summary { cursor: pointer; color: #58a6ff; }
-a { color: #58a6ff; text-decoration: none; }
-a:hover { text-decoration: underline; }
-footer { margin-top: 48px; color: #484f58; font-size: 12px; }
-</style>
-</head>
-<body>
-<main>
-<header>
-  <h1>Upwind eval dashboard</h1>
-  <p>CI status, nightly corpus eval, and production judge stats.
-     Updated <strong>__GENERATED_AT__</strong>.</p>
-</header>
-
-<h2>CI status</h2>
-<div class="cards" id="wf-cards">__WORKFLOW_CARDS__</div>
-
-<h2>__CORPUS_TITLE__</h2>
-__CORPUS__
-
-<h2>Judge comparison</h2>
-__COMPARE__
-
-<h2>Production stats (VM narrative cache)</h2>
-__STATS__
-
-<h2>Rule judge</h2>
-__RULE_HITS__
-
-<footer>
-  Rendered nightly by the Narrative Eval workflow. CI cards refresh live from the
-  public GitHub API; eval data comes from the latest nightly run.
-</footer>
-</main>
-<script>
-const DATA = __DATA_JSON__;
-const RUNS_URL = 'https://api.github.com/repos/' + DATA.repo + '/actions/workflows/';
-
-async function loadRun(file, cardId, label) {
-  const card = document.getElementById(cardId);
-  if (!card) return;
-  const meta = card.querySelector('.wf-meta');
-  const dot = card.querySelector('.dot');
-  try {
-    const res = await fetch(RUNS_URL + file + '/runs?per_page=1', { headers: { Accept: 'application/vnd.github+json' } });
-    if (!res.ok) throw new Error('HTTP ' + res.status);
-    const data = await res.json();
-    const run = (data.workflow_runs || [])[0];
-    if (!run) throw new Error('no runs');
-    const status = run.status === 'completed' ? run.conclusion : run.status;
-    dot.className = 'dot ' + (status === 'success' ? 'ok' : status === 'failure' ? 'bad' : 'warn');
-    const when = run.created_at ? new Date(run.created_at).toLocaleString() : '';
-    meta.innerHTML = '<a href="' + run.html_url + '" target="_blank" rel="noopener">#' + run.run_number +
-      '</a> · ' + (run.head_branch || '') + ' · ' + (run.head_sha || '').slice(0, 7) +
-      '<br>' + status + (when ? ' · ' + when : '');
-  } catch (err) {
-    dot.className = 'dot mute';
-    meta.textContent = 'unavailable (' + err.message + ')';
-  }
-}
-
-DATA.workflows.forEach(function (wf) {
-  loadRun(wf[0], 'wf-' + wf[0].replace('.', '-'), wf[1]);
-});
-</script>
-</body>
-</html>
-"""
+# The page markup lives in backend/eval/templates/evidence.html (stdlib-only load
+# at module import, no jinja). Everything else is substituted at render time.
+TEMPLATE = (Path(__file__).parent / "eval" / "templates" / "evidence.html").read_text(
+    encoding="utf-8"
+)

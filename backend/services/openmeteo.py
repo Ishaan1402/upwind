@@ -6,6 +6,25 @@ from backend.config import get_aqi_category
 OPENMETEO_AQ_URL = "https://air-quality-api.open-meteo.com/v1/air-quality"
 OPENMETEO_WEATHER_URL = "https://api.open-meteo.com/v1/forecast"
 
+
+def _current_time_as_of(current: Dict[str, Any]) -> Optional[str]:
+    """
+    Open-Meteo current.time (ISO-8601, no timezone suffix; the API's default
+    timezone is GMT) as a UTC ISO-8601 string. None when missing/unparseable,
+    so callers only attach as_of when the feed exposed a real timestamp.
+    """
+    raw = current.get("time")
+    if not raw:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(raw).strip().replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc).isoformat()
+
+
 async def fetch_openmeteo_aqi(lat: float, lon: float) -> Optional[Dict[str, Any]]:
     """
     Fallback AQI fetch using Open-Meteo Air Quality API, including Aerosol Optical Depth (AOD).
@@ -42,7 +61,7 @@ async def fetch_openmeteo_aqi(lat: float, lon: float) -> Optional[Dict[str, Any]
 
             cat = get_aqi_category(us_aqi)
 
-            return {
+            result = {
                 "source": "Open-Meteo",
                 "aqi": us_aqi,
                 "primary_pollutant": primary_pollutant,
@@ -57,8 +76,12 @@ async def fetch_openmeteo_aqi(lat: float, lon: float) -> Optional[Dict[str, Any]
                     "OZONE": round(o3, 1) if o3 > 0 else None
                 },
                 "aerosol_optical_depth": round(float(aod), 2) if aod is not None else None,
-                "as_of": datetime.now(timezone.utc).isoformat()
             }
+            # Real forecast valid time from the feed, not wall-clock time.
+            as_of = _current_time_as_of(current)
+            if as_of is not None:
+                result["as_of"] = as_of
+            return result
     except Exception as e:
         print(f"[Open-Meteo Service Error]: {e}")
         return None
@@ -99,7 +122,7 @@ async def fetch_openmeteo_weather(lat: float, lon: float) -> Optional[Dict[str, 
                 total_mm = sum(v for v in precip_mm[-30:] if v is not None)
                 precip_30d_in = round(total_mm / 25.4, 2)
 
-            return {
+            result = {
                 "temperature_f": current.get("temperature_2m"),
                 "wind_speed_mph": current.get("wind_speed_10m"),
                 "wind_direction_deg": current.get("wind_direction_10m"),
@@ -107,6 +130,11 @@ async def fetch_openmeteo_weather(lat: float, lon: float) -> Optional[Dict[str, 
                 "boundary_layer_height_m": current.get("boundary_layer_height"),
                 "precip_30d_in": precip_30d_in,
             }
+            # Real forecast valid time from the feed, used for staleness tracking.
+            as_of = _current_time_as_of(current)
+            if as_of is not None:
+                result["as_of"] = as_of
+            return result
     except Exception as e:
         print(f"[Open-Meteo Weather Error]: {e}")
         return None

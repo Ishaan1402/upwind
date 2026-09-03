@@ -11,7 +11,7 @@ on:
       judge_model:
         description: 'Candidate judge model to compare against the default'
         required: false
-        default: 'llama-3.1-8b-instant'
+        default: 'openai/gpt-oss-20b'
       min_pass:
         description: 'Minimum scenarios that must pass (0-7) before the job fails'
         required: false
@@ -57,7 +57,19 @@ jobs:
         env:
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
-        run: python -m backend.eval judge-compare --model "${{ inputs.judge_model || 'llama-3.1-8b-instant' }}" --out compare.json
+        run: python -m backend.eval judge-compare --model "${{ inputs.judge_model || 'openai/gpt-oss-20b' }}" --out compare.json
+
+      - name: Judge validation against known labels
+        env:
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+        run: python -m backend.eval_validation --out validation.json
+
+      # Bake workflow statuses server-side so the public evidence page never
+      # hits the rate-limited unauthenticated GitHub API from visitors' browsers.
+      - name: Fetch workflow statuses
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python -m backend.eval workflow-status --out workflow_status.json
 
       # Upload before the threshold gate: a failed eval must still keep its
       # evidence and reach the dashboard instead of disappearing.
@@ -69,6 +81,8 @@ jobs:
           path: |
             corpus.json
             compare.json
+            validation.json
+            workflow_status.json
 
       - name: Check pass-rate threshold and summarize
         env:
@@ -133,6 +147,7 @@ jobs:
           mkdir -p "$HOME/.ssh"
           printf '%s\n' "$SSH_PRIVATE_KEY" > "$KEY"
           chmod 600 "$KEY"
+          trap 'rm -f "$KEY"' EXIT
           SSH_OPTS="-i $KEY -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=20"
 
           # Only ship files that actually exist (corpus/compare may be absent
@@ -140,6 +155,8 @@ jobs:
           FILES=""
           [ -f eval-results/corpus.json ] && FILES="$FILES eval-results/corpus.json"
           [ -f eval-results/compare.json ] && FILES="$FILES eval-results/compare.json"
+          [ -f eval-results/validation.json ] && FILES="$FILES eval-results/validation.json"
+          [ -f eval-results/workflow_status.json ] && FILES="$FILES eval-results/workflow_status.json"
 
           # Runs on the VM so production stats from cache.db are embedded fresh.
           REMOTE='set -e
@@ -148,19 +165,30 @@ jobs:
           git pull origin main --ff-only
           ./venv/bin/python -m backend.eval stats --out /tmp/eval_stats.json
           ./venv/bin/python -m backend.eval rule-judge --out /tmp/eval_rule_hits.json
+          ./venv/bin/python -m backend.metrics report --days 30 --out /tmp/eval_metrics.json
+          ./venv/bin/python -m backend.metrics rollup
+          ./venv/bin/python -m backend.metrics prune
           ARGS=""
           [ -f /tmp/corpus.json ] && ARGS="$ARGS --corpus /tmp/corpus.json"
           [ -f /tmp/compare.json ] && ARGS="$ARGS --compare /tmp/compare.json"
-          ./venv/bin/python -m backend.eval render-dashboard $ARGS --stats /tmp/eval_stats.json --rule-hits /tmp/eval_rule_hits.json --out ~/eval-www/index.html
+          [ -f /tmp/validation.json ] && ARGS="$ARGS --validation /tmp/validation.json"
+          [ -f /tmp/workflow_status.json ] && ARGS="$ARGS --workflows /tmp/workflow_status.json"
+          ./venv/bin/python -m backend.eval render-dashboard $ARGS --stats /tmp/eval_stats.json --rule-hits /tmp/eval_rule_hits.json --metrics /tmp/eval_metrics.json --out ~/eval-www/index.html
+          mkdir -p ~/eval-www/evidence
+          ./venv/bin/python -m backend.eval render-dashboard --public $ARGS --stats /tmp/eval_stats.json --rule-hits /tmp/eval_rule_hits.json --metrics /tmp/eval_metrics.json --out ~/eval-www/evidence/index.html
           [ -f ~/.eval_auth ] || { echo "first deploy: run scripts/setup_eval_dashboard.sh on the VM" >&2; exit 1; }
           CODE="$(curl -s -o /dev/null -w "%{http_code}" -k -u "$(cat ~/.eval_auth)" -H "Host: getupwind.me" http://127.0.0.1/eval/)"
           if [ "$CODE" != "200" ]; then
             CODE="$(curl -s -o /dev/null -w "%{http_code}" -k -u "$(cat ~/.eval_auth)" -H "Host: getupwind.me" https://127.0.0.1/eval/)"
           fi
-          if [ "$CODE" = "200" ]; then
-            echo "dashboard published (health check HTTP 200)"
+          PUBLIC_CODE="$(curl -s -o /dev/null -w "%{http_code}" -k -H "Host: getupwind.me" http://127.0.0.1/evidence/ 2>/dev/null || true)"
+          if [ "$PUBLIC_CODE" != "200" ]; then
+            PUBLIC_CODE="$(curl -s -o /dev/null -w "%{http_code}" -k -H "Host: getupwind.me" https://127.0.0.1/evidence/ 2>/dev/null || true)"
+          fi
+          if [ "$CODE" = "200" ] && [ "$PUBLIC_CODE" = "200" ]; then
+            echo "dashboard and public evidence page published (health checks HTTP 200)"
           else
-            echo "health check failed (HTTP $CODE); if this is the first deploy, run scripts/setup_eval_dashboard.sh on the VM" >&2
+            echo "health check failed (eval HTTP $CODE, public HTTP $PUBLIC_CODE); if this is the first deploy, run scripts/setup_eval_dashboard.sh on the VM" >&2
             exit 1
           fi'
 

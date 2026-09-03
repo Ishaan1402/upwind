@@ -7,6 +7,8 @@ from unittest.mock import AsyncMock, patch
 
 from fastapi.testclient import TestClient
 
+from backend.llm import BriefingResult
+from backend.llm_judge import JudgeResult
 from tests.fixtures import SMOKE_LOCATION
 
 PRESENT_SIGNAL = {
@@ -86,8 +88,8 @@ def test_why_includes_openaq_signal_and_trace_step():
          patch("backend.engine.signals.search_fire_incident_name", new_callable=AsyncMock, return_value=None), \
          patch("backend.engine.signals.collect_openaq_signal", new_callable=AsyncMock, return_value=PRESENT_SIGNAL), \
          patch("backend.engine.signals.fetch_place_context", new_callable=AsyncMock, return_value=PLACE_RESULT), \
-         patch("backend.routers.why.generate_narrative_briefing", new_callable=AsyncMock, return_value="test narrative"), \
-         patch("backend.routers.why.judge_narrative", new_callable=AsyncMock, return_value={"verdict": "pass"}), \
+         patch("backend.routers.why.generate_narrative_briefing", new_callable=AsyncMock, return_value=BriefingResult(narrative="test narrative")), \
+         patch("backend.routers.why.judge_narrative", new_callable=AsyncMock, return_value=JudgeResult(verdict="pass")), \
          patch("backend.routers.why.get_cached_narrative", return_value=None), \
          patch("backend.routers.why.set_cached_narrative", return_value=None):
         with TestClient(app) as client:
@@ -123,8 +125,8 @@ def test_why_cache_key_includes_aqi_and_pollutant():
          patch("backend.engine.signals.search_fire_incident_name", new_callable=AsyncMock, return_value=None), \
          patch("backend.engine.signals.collect_openaq_signal", new_callable=AsyncMock, return_value=PRESENT_SIGNAL), \
          patch("backend.engine.signals.fetch_place_context", new_callable=AsyncMock, return_value=PLACE_RESULT), \
-         patch("backend.routers.why.generate_narrative_briefing", new_callable=AsyncMock, return_value="test narrative"), \
-         patch("backend.routers.why.judge_narrative", new_callable=AsyncMock, return_value={"verdict": "pass"}), \
+         patch("backend.routers.why.generate_narrative_briefing", new_callable=AsyncMock, return_value=BriefingResult(narrative="test narrative")), \
+         patch("backend.routers.why.judge_narrative", new_callable=AsyncMock, return_value=JudgeResult(verdict="pass")), \
          patch("backend.routers.why.get_cached_narrative", return_value=None), \
          patch("backend.routers.why.set_cached_narrative", side_effect=fake_set):
         with TestClient(app) as client:
@@ -191,7 +193,7 @@ def test_stream_emits_openaq_events_and_signal():
          patch("backend.routers.why.generate_narrative_briefing_stream", side_effect=fake_stream), \
          patch("backend.routers.why.get_cached_narrative", return_value=None), \
          patch("backend.routers.why.set_cached_narrative", return_value=None), \
-         patch("backend.routers.why.judge_narrative", new_callable=AsyncMock, return_value={"verdict": "pass"}):
+         patch("backend.routers.why.judge_narrative", new_callable=AsyncMock, return_value=JudgeResult(verdict="pass")):
         with TestClient(app) as client:
             with client.stream(
                 "GET",
@@ -239,9 +241,9 @@ def test_stream_and_post_share_identical_signals():
         patch("backend.engine.signals.fetch_place_context", new_callable=AsyncMock, return_value=PLACE_RESULT),
     ]
     router_patches = [
-        patch("backend.routers.why.generate_narrative_briefing", new_callable=AsyncMock, return_value="test"),
+        patch("backend.routers.why.generate_narrative_briefing", new_callable=AsyncMock, return_value=BriefingResult(narrative="test")),
         patch("backend.routers.why.generate_narrative_briefing_stream", side_effect=fake_stream),
-        patch("backend.routers.why.judge_narrative", new_callable=AsyncMock, return_value={"verdict": "pass"}),
+        patch("backend.routers.why.judge_narrative", new_callable=AsyncMock, return_value=JudgeResult(verdict="pass")),
         patch("backend.routers.why.update_cached_verdict", return_value=None),
         patch("backend.routers.why.get_cached_narrative", return_value=None),
         patch("backend.routers.why.set_cached_narrative", return_value=None),

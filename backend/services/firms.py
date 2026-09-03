@@ -435,12 +435,17 @@ async def fetch_firms_hotspots(
 
             # Build pixel records: age (recency), confidence weight, distance/bearing.
             pixels = []
+            # Most recent acquisition datetime among the surviving detections,
+            # used as the feed's as_of timestamp for staleness tracking.
+            latest_acq_dt: Optional[datetime] = None
             for row in parsed:
                 acq_dt = parse_firms_acq_datetime(row.get("acq_date"), row.get("acq_time"))
                 # Missing/malformed acq fields degrade gracefully: treat as fresh.
                 age_hours = 0.0 if acq_dt is None else max(0.0, (reference - acq_dt).total_seconds() / 3600.0)
                 if age_hours > p.firms_max_age_hours:
                     continue
+                if acq_dt is not None and (latest_acq_dt is None or acq_dt > latest_acq_dt):
+                    latest_acq_dt = acq_dt
 
                 confidence = row.get("confidence")
                 # Unknown/missing confidence keeps a neutral weight of 1.0.
@@ -514,38 +519,36 @@ async def fetch_firms_hotspots(
             nearest = clusters[0]
 
             if upwind_clusters:
-                return {
-                    "status": "present",
-                    "hotspots": pixels[:40],
-                    "clusters": clusters[:10],
-                    "count": count,
-                    "total_count": total_count,
-                    "nearest": nearest,
-                    "alignment": "upwind",
-                    "details": (
-                        f"{count} upwind hotspot cluster(s) found "
-                        f"(strongest cluster overall {nearest['distance_miles']} mi {nearest['bearing']} "
-                        f"(FRP {nearest['frp']:.0f} MW, {nearest['detections']} detections)); "
-                        f"{total_count} total detected nearby"
-                    )
-                }
+                alignment = "upwind"
+                details = (
+                    f"{count} upwind hotspot cluster(s) found "
+                    f"(strongest cluster overall {nearest['distance_miles']} mi {nearest['bearing']} "
+                    f"(FRP {nearest['frp']:.0f} MW, {nearest['detections']} detections)); "
+                    f"{total_count} total detected nearby"
+                )
+            else:
+                # Nearby non-upwind hotspots
+                alignment = "nearby"
+                details = (
+                    f"{total_count} hotspot cluster(s) within ~{int(radius_miles)} mi "
+                    f"(strongest cluster {nearest['distance_miles']} mi {nearest['bearing']} "
+                    f"(FRP {nearest['frp']:.0f} MW, {nearest['detections']} detections)), "
+                    f"but none aligned upwind of current wind"
+                )
 
-            # Nearby non-upwind hotspots
-            return {
+            result = {
                 "status": "present",
                 "hotspots": pixels[:40],
                 "clusters": clusters[:10],
                 "count": count,
                 "total_count": total_count,
                 "nearest": nearest,
-                "alignment": "nearby",
-                "details": (
-                    f"{total_count} hotspot cluster(s) within ~{int(radius_miles)} mi "
-                    f"(strongest cluster {nearest['distance_miles']} mi {nearest['bearing']} "
-                    f"(FRP {nearest['frp']:.0f} MW, {nearest['detections']} detections)), "
-                    f"but none aligned upwind of current wind"
-                )
+                "alignment": alignment,
+                "details": details,
             }
+            if latest_acq_dt is not None:
+                result["as_of"] = latest_acq_dt.isoformat()
+            return result
 
     except Exception as e:
         print(f"[FIRMS Service Error]: {e}")

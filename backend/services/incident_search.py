@@ -17,7 +17,8 @@ WILDLAND_CONTEXT_RE = re.compile(
     re.IGNORECASE,
 )
 
-# Filter out urban, structural, or residential fire headlines
+# Urban / person / structure / vehicle fires — domain class, not place-specific names.
+# Blocks "Man Starts Fire…", "House Fire…", "Car Fire…" everywhere in the US.
 URBAN_OR_PERSON_FIRE_RE = re.compile(
     r"(?i)"
     r"(\b(man|woman|men|person|people|teen|teenager|resident|homeowner|neighbor)\b.{0,48}\bfires?\b)"
@@ -25,12 +26,12 @@ URBAN_OR_PERSON_FIRE_RE = re.compile(
     r"(\b(house|home|apartment|condo|garage|warehouse|barn|vehicle|car|truck|bus|dumpster)\s+fires?\b)"
 )
 
-# Named incident pattern
+# Named-incident extractor: "Creek Fire", "Hay Creek Fire", "Dixie Complex"
 INCIDENT_NAME_RE = re.compile(
     r"\b([A-Z][a-zA-Z0-9'-]+(?:\s+[A-Z][a-zA-Z0-9'-]+)?)\s+(?:Fire|Wildfire|Complex)\b"
 )
 
-# Fire category generics
+# Fire *categories* (not named incidents). Closed domain ontology.
 FIRE_TYPE_GENERICS = {
     "Brush", "Grass", "Forest", "Structure", "House", "Home", "Building",
     "Vehicle", "Car", "Truck", "Dumpster", "Trash", "Rubbish", "Campfire",
@@ -77,7 +78,7 @@ def looks_like_verb_token(token: str) -> bool:
         return False
     if re.fullmatch(r"[A-Z][a-z]+(?:ed|ing)", t):
         return True
-    # Detect active headline verbs while preserving geographic nouns
+    # Present-tense headline verbs: Starts, Sparks, Spreads — not Oaks/Hills/Falls
     if re.fullmatch(r"[A-Z][a-z]+s", t) and t.endswith(("ts", "rs", "ks", "ds", "ns", "ps")):
         if t.lower() in {"oaks", "hills", "falls", "woods", "springs", "acres"}:
             return False
@@ -122,7 +123,10 @@ def title_allows_incident_extraction(title: str) -> bool:
 
 
 def parse_rss_items_for_incident(rss_text: str, max_days: int = 7) -> Optional[str]:
-    """Parse Google News RSS for recent wildland named incidents within max_days"""
+    """
+    Parse Google News RSS for recent wildland named incidents (within max_days).
+    Uses structural title gates — not location-specific name blocklists.
+    """
     items = re.findall(r"<item>(.*?)</item>", rss_text, re.DOTALL)
     for item in items:
         title_match = re.search(r"<title>(.*?)</title>", item)
@@ -139,20 +143,29 @@ def parse_rss_items_for_incident(rss_text: str, max_days: int = 7) -> Optional[s
             continue
 
         for m in INCIDENT_NAME_RE.findall(title):
-            candidate = m.strip()
-            if is_valid_incident_candidate(candidate):
-                return f"{candidate} Fire"
+            base_name = re.sub(r"\s+(Fire|Wildfire|Complex)$", "", m).strip()
+            if base_name and is_valid_incident_candidate(base_name):
+                return f"{base_name} Fire"
 
     return None
 
 
-async def search_fire_incident_name(state: Optional[str], city: Optional[str], lat: float, lon: float) -> Optional[str]:
-    """Search Google News RSS for recent wildland fire incident mentions"""
-    location_str = (
-        f"{city} {state}".strip()
-        if (city or state)
-        else (f"{state}".strip() if state else f"{lat:.2f}, {lon:.2f}")
-    )
+async def search_fire_incident_name(
+    state: Optional[str],
+    city: Optional[str],
+    lat: float,
+    lon: float,
+    country_code: Optional[str] = None,
+) -> Optional[str]:
+    """
+    Search Google News RSS for recent wildland fire incident mentions (7-day window).
+    Queries bias toward wildfire/wildland language so urban 'fire' crime headlines are rare.
+    Naming is decorative — scoring only treats news as a fire vote when FIRMS corroborates.
+    """
+    location_parts = [city, state]
+    if country_code and country_code.lower() != "us":
+        location_parts.append(country_code.upper())
+    location_str = " ".join(part for part in location_parts if part).strip() or f"{lat:.2f}, {lon:.2f}"
 
     wildland_terms = '(wildfire OR wildland OR "acres burned" OR evacuation)'
     queries = []
@@ -162,6 +175,8 @@ async def search_fire_incident_name(state: Optional[str], city: Optional[str], l
         queries.append(f"{location_str} {wildland_terms} when:7d")
     if state:
         queries.append(f"{state} {wildland_terms} when:7d")
+    # A city-less state query duplicates the location_str fallback.
+    queries = list(dict.fromkeys(queries))
 
     async with httpx.AsyncClient(timeout=4.5) as client:
         for q in queries:

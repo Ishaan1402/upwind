@@ -28,7 +28,7 @@ TOOL_STEPS = {
     "hms_scan": "Checking NOAA smoke-plume analysis overhead",
     "wfigs_scan": "Checking federal wildfire incident registry",
     "nws_dust_scan": "Checking NWS dust warnings/advisories",
-    "metar_dust_scan": "Checking nearby airport METARs for blowing dust",
+    "metar_dust_scan": "Checking nearby METAR stations for dust",
     "firms_scan": "Scanning NASA FIRMS thermal hotspot clusters upwind",
     "web_search": "Searching public news & active incident feeds (Web Search)",
     "openaq_monitors": "Reading local monitor concentrations (OpenAQ)",
@@ -36,13 +36,16 @@ TOOL_STEPS = {
     "score_hypotheses": "Scoring attribution hypotheses (Evidence Matrix)"
 }
 
-def create_trace_step(step: str, duration_ms: float, status: str = "done") -> Dict[str, Any]:
-    return {
+def create_trace_step(step: str, duration_ms: float, status: str = "done", as_of: Optional[str] = None) -> Dict[str, Any]:
+    trace: Dict[str, Any] = {
         "step": step,
         "label": TOOL_STEPS.get(step, step),
         "duration_ms": max(0.1, round(duration_ms, 1)),
         "status": status
     }
+    if as_of is not None:
+        trace["as_of"] = as_of
+    return trace
 
 
 def _openaq_unavailable_signal(detail: str) -> Dict[str, Any]:
@@ -55,12 +58,24 @@ def _openaq_unavailable_signal(detail: str) -> Dict[str, Any]:
 
 
 async def collect_openaq_signal(
-    lat: float, lon: float, include_baselines: bool = True
+    lat: float,
+    lon: float,
+    include_baselines: bool = True,
+    country_code: Optional[str] = "US",
 ) -> Dict[str, Any]:
-    # Gather OpenAQ data; fetch past 3h US reference data for attribution. Fall back to "unavailable" on missing or stale data, skips baselines when include_baselines=False to save latency.
+    """
+    Gather OpenAQ reference-monitor concentrations for attribution.
+
+    Only fresh (<=3h) reference-monitor readings for the target country are
+    included; anything else results in an "unavailable" signal so scoring
+    behaves as before. A country_code of None searches without a country filter.
+    Baseline percentiles are skipped when include_baselines is False (Good-AQI
+    briefings never use them, so the extra calls are wasted latency).
+    Never raises.
+    """
     p = get_params()
     try:
-        candidates = await discover_reference_monitors(lat, lon, limit=3)
+        candidates = await discover_reference_monitors(lat, lon, limit=3, country_code=country_code)
         if not candidates:
             return _openaq_unavailable_signal(
                 "No air quality monitor within 25 km (or OpenAQ key not configured)"
@@ -78,7 +93,9 @@ async def collect_openaq_signal(
 
         # Widen radius when nearest monitor lacks fresh readings
         if not latest_by_id:
-            wider = await discover_reference_monitors(lat, lon, limit=10, radius_m=p.openaq_radius_m)
+            wider = await discover_reference_monitors(
+                lat, lon, limit=10, radius_m=p.openaq_radius_m, country_code=country_code
+            )
             if wider:
                 new_ids = [c["location_id"] for c in candidates]
                 wider_results = await asyncio.gather(
@@ -236,7 +253,8 @@ async def iter_evidence_signals(
         dur = (time.perf_counter() - t0) * 1000
         result = _unavailable_feed_result(result, unavailable_detail)
         status = _STEP_STATUS.get(result.get("status"), "done")
-        events.put_nowait(("tool_done", create_trace_step(step, dur, status)))
+        as_of = result["as_of"] if isinstance(result, dict) and result.get("as_of") else None
+        events.put_nowait(("tool_done", create_trace_step(step, dur, status, as_of=as_of)))
         return result
 
     async def _run_weather():
@@ -247,7 +265,8 @@ async def iter_evidence_signals(
         except Exception:
             weather = None
         dur = (time.perf_counter() - t0) * 1000
-        events.put_nowait(("tool_done", create_trace_step("weather_vector", dur, "done" if weather else "warning")))
+        as_of = weather.get("as_of") if isinstance(weather, dict) else None
+        events.put_nowait(("tool_done", create_trace_step("weather_vector", dur, "done" if weather else "warning", as_of=as_of)))
         return weather
 
     async def _run_web_search():
@@ -263,10 +282,11 @@ async def iter_evidence_signals(
 
     async def _orchestrate():
         p = get_params()
+        aqi_val = observation.get("aqi")
         try:
             async with asyncio.TaskGroup() as tg:
                 is_pm_elevated = (
-                    observation.get("aqi", 0) > p.aqi_elevated and "PM" in observation.get("primary_pollutant", "").upper()
+                    aqi_val is not None and aqi_val > p.aqi_elevated and "PM" in observation.get("primary_pollutant", "").upper()
                 )
 
                 # T=0: independent position-only tasks
@@ -282,7 +302,7 @@ async def iter_evidence_signals(
                     "metar_dust_scan", fetch_metar_dust(lat, lon), "METAR dust observations unavailable"
                 ))
                 openaq_t = tg.create_task(_run_feed(
-                    "openaq_monitors", collect_openaq_signal(lat, lon, include_baselines=observation.get("aqi", 0) > p.aqi_elevated),
+                    "openaq_monitors", collect_openaq_signal(lat, lon, include_baselines=(aqi_val is not None and aqi_val > p.aqi_elevated), country_code=location.get("country_code") or "US"),
                     "OpenAQ concentration feed unavailable",
                 ))
                 place_t = tg.create_task(_run_feed(
@@ -473,10 +493,10 @@ def build_evidence_signals(
         "details": nws_res.get("details", ""),
     })
 
-    # Signal: Nearby Airport Blowing Dust (METAR) (one-sided dust confirmation)
+    # Signal: METAR Dust Report (one-sided dust confirmation)
     signals.append({
         "id": "metar_dust",
-        "label": "Nearby Airport Blowing Dust (METAR)",
+        "label": "METAR Dust Report",
         "status": metar_res.get("status", "unavailable"),
         "station": metar_res.get("station"),
         "phenomenon": metar_res.get("phenomenon"),

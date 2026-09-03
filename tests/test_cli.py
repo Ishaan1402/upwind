@@ -1,6 +1,7 @@
 import pytest
 import asyncio
 from backend.cli import parse_zip_inputs, fetch_zip_briefing
+from backend.llm import BriefingResult
 
 def test_parse_zip_inputs():
     res1 = parse_zip_inputs(["90210", "94103"])
@@ -29,7 +30,7 @@ def test_fetch_zip_briefing():
          patch("backend.cli.generate_narrative_briefing", new_callable=AsyncMock) as mock_llm:
         mock_airnow.return_value = None
         mock_openmeteo.return_value = mock_obs
-        mock_llm.return_value = "Beverly Hills has good air quality overall."
+        mock_llm.return_value = BriefingResult(narrative="Beverly Hills has good air quality overall.")
 
         result = asyncio.run(fetch_zip_briefing("90210", use_cache=False))
         assert result["zip"] == "90210"

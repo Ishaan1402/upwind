@@ -1,7 +1,26 @@
+from datetime import datetime, timezone
 from typing import Dict, Any, Optional
 import httpx
 
 OPENMETEO_AQ_URL = "https://air-quality-api.open-meteo.com/v1/air-quality"
+
+def _current_time_as_of(current: Dict[str, Any]) -> Optional[str]:
+    """
+    Open-Meteo current.time (the CAMS-derived forecast's current valid time,
+    ISO-8601 without a suffix; the API's default timezone is GMT) as a UTC
+    ISO-8601 string. None when missing/unparseable, so as_of is only attached
+    when the response exposed a real timestamp.
+    """
+    raw = current.get("time")
+    if not raw:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(raw).strip().replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc).isoformat()
 
 def classify_aod(aod_value: float) -> Dict[str, Any]:
     """
@@ -52,7 +71,11 @@ async def fetch_aod_signal(lat: float, lon: float, existing_aod: Optional[float]
                 current = data.get("current", {})
                 aod_val = current.get("aerosol_optical_depth")
                 if aod_val is not None:
-                    return classify_aod(float(aod_val))
+                    result = classify_aod(float(aod_val))
+                    as_of = _current_time_as_of(current)
+                    if as_of is not None:
+                        result["as_of"] = as_of
+                    return result
     except Exception as e:
         print(f"[AOD Service Error]: {e}")
 

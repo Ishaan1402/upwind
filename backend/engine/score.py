@@ -36,6 +36,7 @@ def score_hypotheses(
     o3 = sig_map.get("ozone_heat", {})
 
     aqi_val = observation.get("aqi", 0)
+    aqi_display = aqi_val if aqi_val is not None else "unknown"
     primary = observation.get("primary_pollutant", "").upper()
 
     hypotheses = []
@@ -97,7 +98,7 @@ def score_hypotheses(
             bounds, conflict_value = p.pm10_aqi_lower_bounds, openaq.get("pm10")
         else:
             bounds, conflict_value = None, None
-        if bounds and conflict_value is not None:
+        if bounds and conflict_value is not None and aqi_val is not None:
             lower = _aqi_concentration_lower_bound(aqi_val, bounds)
             if lower is not None and conflict_value < lower * p.openaq_measured_conflict_factor:
                 measured_conflict = True
@@ -237,7 +238,7 @@ def score_hypotheses(
     smoke_against = []
 
     if pm_primary and pm_elevated and not light_haze_extreme_pm:
-        smoke_support.append(f"Surface PM2.5/PM10 is elevated as primary pollutant (AQI {aqi_val})")
+        smoke_support.append(f"Surface PM2.5/PM10 is elevated as primary pollutant (AQI {aqi_display})")
 
     if fine_dominated and pm_elevated and (aod_present or has_smoke_corroboration):
         smoke_support.append(
@@ -309,7 +310,7 @@ def score_hypotheses(
         smoke_score = 85 if hms_high else 70
     elif wfigs_corroborates and wfigs_alignment == "upwind" and pm_elevated:
         # Upwind WFIGS federal incident scoring; only extreme PM pushes to high
-        extreme_pm = aqi_val >= p.extreme_pm_aqi
+        extreme_pm = aqi_val is not None and aqi_val >= p.extreme_pm_aqi
         smoke_conf = "high" if extreme_pm else "medium"
         smoke_score = 80 if extreme_pm else 70
     elif has_firms_corroboration and pm_elevated:
@@ -407,7 +408,7 @@ def score_hypotheses(
     is_hot = o3.get("hot_day", False)
 
     if o3_primary:
-        o3_support.append(f"Ground-level Ozone (O3) is the primary reporting pollutant (AQI {aqi_val})")
+        o3_support.append(f"Ground-level Ozone (O3) is the primary reporting pollutant (AQI {aqi_display})")
     else:
         o3_against.append(f"Primary pollutant is {primary}, not Ozone")
 
@@ -522,7 +523,7 @@ def score_hypotheses(
 
     # -----------------------------------------------------------------------
     # Official/observed dust confirmation (Gap 3b): an NWS dust warning or a
-    # nearby airport METAR reporting blowing dust is a high-precision,
+    # nearby METAR station reporting blowing dust is a high-precision,
     # low-recall confirmation. When present on a dust-suspect (PM10-primary or
     # coarse-dominated) elevated-PM day, it forces windblown dust high/>=90
     # over any smoke evidence. Absence is NOT evidence: absent/unavailable
@@ -542,9 +543,9 @@ def score_hypotheses(
         if metar_dust.get("status") == "present":
             phenomenon = metar_dust.get("phenomenon") or "BLDU"
             dust_support.append(
-                f"A nearby airport reported {phenomenon} (blowing dust)"
+                f"A nearby METAR station reported {phenomenon} (blowing dust)"
             )
-        dust_score = max(dust_score, 90)
+        dust_score = max(dust_score, 95)
         dust_conf = "high"
         smoke_against.append("An official/observed dust signal confirms dust over smoke")
         dust_h = next(h for h in hypotheses if h["id"] == "windblown_dust")
@@ -556,7 +557,7 @@ def score_hypotheses(
     stagnation_against = []
 
     if pm_elevated:
-        stagnation_support.append(f"Surface PM2.5 is elevated (AQI {aqi_val})")
+        stagnation_support.append(f"Surface PM2.5 is elevated (AQI {aqi_display})")
     if is_cold:
         stagnation_support.append(f"Cold surface temperature ({temp_f}°F) is consistent with a trapping winter inversion")
     elif temp_f is not None:
@@ -611,14 +612,14 @@ def score_hypotheses(
     is_dust_or_stagnation = pm10_primary or (is_cold and is_calm)
 
     if pm_elevated and fire_signal_count == 0 and not has_haze and not is_dust_or_stagnation:
-        urban_support.append(f"PM2.5 is elevated (AQI {aqi_val}) without verified fire, dust, or stagnation signals")
+        urban_support.append(f"PM2.5 is elevated (AQI {aqi_display}) without verified fire, dust, or stagnation signals")
     elif pm_elevated and light_haze_extreme_pm and not is_dust_or_stagnation:
         urban_support.append(
-            f"PM2.5 is very elevated (AQI {aqi_val}), but light haze suggests regional smoke may contribute alongside local sources"
+            f"PM2.5 is very elevated (AQI {aqi_display}), but light haze suggests regional smoke may contribute alongside local sources"
         )
     elif pm_elevated and haze_no_fire and not is_dust_or_stagnation:
         urban_support.append(
-            f"PM2.5 is elevated (AQI {aqi_val}) with regional haze but no verified fire evidence; local urban or regional sources remain a strong explanation"
+            f"PM2.5 is elevated (AQI {aqi_display}) with regional haze but no verified fire evidence; local urban or regional sources remain a strong explanation"
         )
     elif pm_elevated:
         urban_support.append("PM is elevated, but a more specific mode (fire, dust, or stagnation) better explains it")
@@ -720,7 +721,7 @@ def score_hypotheses(
         category = observation.get("category", "elevated")
         dist_part = f" ({openaq_dist_km:.0f} km away)" if openaq_dist_km is not None else ""
         open_questions.append(
-            f"The reported AQI is {category} ({aqi_val}), but the nearest air quality monitor "
+            f"The reported AQI is {category} ({aqi_display}), but the nearest air quality monitor "
             f"measures {conflict_value:.0f} micrograms per cubic meter right now{dist_part}; the AQI is "
             "a longer-term average while the monitor reading is current, so the two can differ"
         )

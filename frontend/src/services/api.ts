@@ -1,6 +1,30 @@
-import type { AqiResponse, WhyResponse } from '../types/aqi';
+import type { AqiResponse, LocationInfo } from '../types/aqi';
 
 const API_BASE = import.meta.env.VITE_API_BASE ?? '/api';
+
+/**
+ * Fire-and-forget user-behavior ping for the observability dashboard.
+ * Never blocks or throws; keepalive so it survives page unload.
+ */
+export function trackEvent(event: string, detail?: string): void {
+  try {
+    fetch(`${API_BASE}/events`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ event, detail: detail || null }),
+      keepalive: true,
+    }).catch(() => {});
+  } catch (_) { /* observability must never break the app */ }
+}
+
+/** Human-readable location detail for event pings. */
+export function locationDetail(location: Pick<LocationInfo, 'lat' | 'lon' | 'name' | 'zip_code'>): string {
+  return (
+    location?.zip_code ||
+    location?.name ||
+    (location ? `${Number(location.lat).toFixed(4)},${Number(location.lon).toFixed(4)}` : '')
+  );
+}
 
 async function fetchWithTimeout(url: string, options: RequestInit = {}, timeoutMs = 8000): Promise<Response> {
   const controller = new AbortController();
@@ -43,21 +67,6 @@ export async function fetchAqiByCoords(lat: number, lon: number): Promise<AqiRes
   return res.json();
 }
 
-export async function fetchWhyExplanation(location: any, observation: any): Promise<WhyResponse> {
-  const res = await fetchWithTimeout(`${API_BASE}/why`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ location, observation })
-  }, 25000);
-
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({ detail: 'Failed to generate explanation' }));
-    throw new Error(err.detail || 'Failed to fetch explanation');
-  }
-
-  return res.json();
-}
-
 export interface StreamCallbacks {
   onToolStart?: (data: { step: string; label: string }) => void;
   onToolDone?: (data: { step: string; label: string; duration_ms: number; status: string; result?: string }) => void;
@@ -67,7 +76,7 @@ export interface StreamCallbacks {
   onError?: (err: any) => void;
 }
 
-export function streamWhyExplanation(location: any, observation: any, callbacks: StreamCallbacks): () => void {
+export function streamWhyExplanation(location: any, observation: any, callbacks: StreamCallbacks, observationToken?: string | null): () => void {
   const params = new URLSearchParams({
     lat: String(location.lat),
     lon: String(location.lon),
@@ -75,7 +84,9 @@ export function streamWhyExplanation(location: any, observation: any, callbacks:
     city: location.city || '',
     state: location.state || '',
     name: location.name || '',
-    aqi: String(observation.aqi || 50),
+    country_code: location.country_code || '',
+    observation_token: observationToken || '',
+    aqi: String(observation.aqi ?? 50),
     primary_pollutant: observation.primary_pollutant || 'PM2.5',
     category: observation.category || 'Moderate'
   });

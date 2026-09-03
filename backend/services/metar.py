@@ -15,6 +15,7 @@ observation for every station in the neighborhood.
 """
 
 import re
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 import httpx
@@ -62,6 +63,46 @@ def match_dust_phenomenon(raw_metar: str, wx_string: Optional[str]) -> Optional[
     return None
 
 
+def _parse_metar_obs_time(raw_metar: str, now: Optional[datetime] = None) -> Optional[datetime]:
+    """
+    Parse the DDHHMMZ observation-time group embedded in a raw METAR into an
+    aware UTC datetime.
+
+    METAR timestamps carry only a day-of-month, so the current UTC year/month
+    supplies the missing parts. The day is resolved against the current AND
+    previous months and the most recent date that is not in the future wins
+    (a future-dated day-of-month is last month's, e.g. day 31 seen on the 20th;
+    a day that doesn't fit the current month, e.g. day 30 in February, is the
+    previous month's). Returns None when the group is missing or malformed -
+    callers skip as_of in that case.
+    """
+    if not raw_metar:
+        return None
+    match = re.search(r"\b(\d{6})Z\b", raw_metar)
+    if not match:
+        return None
+    day, hour, minute = (int(match.group(1)[i:i + 2]) for i in (0, 2, 4))
+    if day < 1 or day > 31 or hour > 23 or minute > 59:
+        return None
+
+    now = now or datetime.now(timezone.utc)
+    months = [(now.year, now.month)]
+    if now.month == 1:
+        months.append((now.year - 1, 12))
+    else:
+        months.append((now.year, now.month - 1))
+
+    candidates: List[datetime] = []
+    for year, month in months:
+        try:
+            candidate = datetime(year, month, day, hour, minute, tzinfo=timezone.utc)
+        except ValueError:
+            continue  # e.g. 31 Feb - unresolvable
+        if candidate <= now:
+            candidates.append(candidate)
+    return max(candidates) if candidates else None
+
+
 async def fetch_metar_dust(lat: float, lon: float) -> Dict[str, Any]:
     """
     Check nearby airport METARs for blowing-dust present weather.
@@ -88,12 +129,16 @@ async def fetch_metar_dust(lat: float, lon: float) -> Dict[str, Any]:
                 raw = obs.get("rawOb") or ""
                 code = match_dust_phenomenon(raw, obs.get("wxString"))
                 if code is not None:
-                    return {
+                    result = {
                         "status": "present",
                         "station": obs.get("icaoId") or obs.get("stationId"),
                         "raw": raw,
                         "phenomenon": code,
                     }
+                    obs_dt = _parse_metar_obs_time(raw)
+                    if obs_dt is not None:
+                        result["as_of"] = obs_dt.isoformat()
+                    return result
             return _absent()
     except Exception as e:
         return _unavailable(str(e) or "METAR feed unreachable")

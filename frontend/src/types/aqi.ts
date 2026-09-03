@@ -5,6 +5,16 @@ export interface LocationInfo {
   zip_code?: string | null;
   state?: string | null;
   city?: string | null;
+  country_code?: string | null;
+  country?: string | null;
+}
+
+export interface CoverageInfo {
+  country_code?: string | null;
+  mode: 'us' | 'international' | 'unknown';
+  aqi_index: string;
+  sources: string[];
+  disclaimer: string;
 }
 
 export interface ObservationInfo {
@@ -23,6 +33,8 @@ export interface ObservationInfo {
 export interface AqiResponse {
   location: LocationInfo;
   observation: ObservationInfo;
+  coverage?: CoverageInfo;
+  observation_token?: string | null;
 }
 
 export interface SignalItem {
@@ -63,6 +75,7 @@ export interface WhyResponse {
   open_questions: string[];
   narrative: string;
   execution_trace?: ExecutionTraceStep[];
+  coverage?: CoverageInfo;
   total_ms?: number;
   map_layers?: {
     firms_hotspots?: Array<{ lat: number; lon: number; frp?: number; distance_km?: number }>;

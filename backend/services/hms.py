@@ -1,3 +1,5 @@
+import re
+from datetime import datetime, timedelta, timezone
 from typing import Dict, Any, List, Optional
 import time
 import httpx
@@ -50,6 +52,27 @@ def _point_in_ring_set(x: float, y: float, rings: List[List[List[float]]]) -> bo
         return False
     return not any(point_in_polygon(x, y, hole) for hole in rings[1:] if hole and len(hole) > 2)
 
+
+def _parse_hms_analysis_time(value: Any) -> Optional[datetime]:
+    """
+    Parse the ArcGIS smoke-analysis timestamp ('YYYYDDD HHMM', e.g. '2026232 1500'
+    = 2026 day-of-year 232 at 15:00 UTC) into an aware UTC datetime. None when
+    the value is missing or malformed.
+    """
+    if not value:
+        return None
+    m = re.match(r"^(\d{4})(\d{3}) (\d{2})(\d{2})$", str(value).strip())
+    if not m:
+        return None
+    year, day_of_year, hour, minute = (int(g) for g in m.groups())
+    if not (1 <= day_of_year <= 366 and 0 <= hour <= 23 and 0 <= minute <= 59):
+        return None
+    try:
+        return datetime(year, 1, 1, hour, minute, tzinfo=timezone.utc) + timedelta(days=day_of_year - 1)
+    except ValueError:
+        return None
+
+
 def check_hms_smoke_plume(lat: float, lon: float, geojson_data: Dict[str, Any]) -> Dict[str, Any]:
     """
     Check if (lon, lat) falls inside any HMS smoke polygon.
@@ -58,6 +81,16 @@ def check_hms_smoke_plume(lat: float, lon: float, geojson_data: Dict[str, Any]) 
     features = geojson_data.get("features", [])
     if not features:
         return {"status": "absent", "density": None, "details": "No HMS smoke features in feed"}
+
+    # Most recent smoke-analysis time across the returned polygons, used as the
+    # feed's as_of timestamp for staleness tracking.
+    analysis_times = [
+        dt
+        for feature in features
+        for dt in [_parse_hms_analysis_time((feature.get("properties") or {}).get("Start"))]
+        if dt is not None
+    ]
+    as_of = max(analysis_times).isoformat() if analysis_times else None
 
     found_densities = []
 
@@ -86,12 +119,15 @@ def check_hms_smoke_plume(lat: float, lon: float, geojson_data: Dict[str, Any]) 
         dens_str = ", ".join(found_densities)
         levels = {_DENSITY_MAP.get(d.strip().lower()) for d in found_densities}
         density_label = "heavy" if "heavy" in levels else ("medium" if "medium" in levels else "light")
-        return {
+        result = {
             "status": "present",
             "density": density_label,
             "raw_density": dens_str,
-            "details": f"Location is inside HMS overhead smoke plume ({density_label} density)"
+            "details": f"Location is inside HMS overhead smoke plume ({density_label} density)",
         }
+        if as_of is not None:
+            result["as_of"] = as_of
+        return result
 
     return {
         "status": "absent",
@@ -123,7 +159,7 @@ async def _fetch_hms_geojson(lat: float, lon: float) -> Optional[Dict[str, Any]]
         "geometryType": "esriGeometryPoint",
         "spatialRel": "esriSpatialRelIntersects",
         "inSR": 4326,
-        "outFields": "Density",
+        "outFields": "Density,Start,End_",
         "f": "geojson",
         "resultRecordCount": 100,
     }
